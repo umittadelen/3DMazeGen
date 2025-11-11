@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Generator</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #000;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0 0 20px 0;
+            font-size: 32px;
+        }
+
+        .controls {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 20px;
+            border-radius: 8px;
+            border: 2px solid #666;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+            max-width: 90vw;
+        }
+
+        label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        select,
+        input[type="number"] {
+            padding: 8px;
+            background: rgba(20, 20, 20, 0.9);
+            border: 2px solid #666;
+            color: #fff;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        input[type="number"] {
+            width: 80px;
+        }
+
+        select {
+            min-width: 150px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: rgba(70, 70, 70, 0.8);
+            color: white;
+            border: 2px solid #666;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background: rgba(100, 100, 100, 0.8);
+        }
+
+        button:disabled {
+            background: rgba(40, 40, 40, 0.8);
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        #generateBtn {
+            background: rgba(50, 100, 50, 0.8);
+        }
+
+        #generateBtn:hover:not(:disabled) {
+            background: rgba(70, 130, 70, 0.8);
+        }
+
+        .progress {
+            background: rgba(30, 30, 30, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 2px solid #666;
+            margin-bottom: 20px;
+            width: 600px;
+            max-width: 90vw;
+        }
+
+        .progress-bar {
+            background: rgba(20, 20, 20, 0.9);
+            height: 30px;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+            border: 1px solid #444;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #0f3460, #1a1a2e);
+            transition: width 0.1s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        .status {
+            font-size: 14px;
+            color: #aaa;
+        }
+
+        #canvas {
+            border: 1px solid #666;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            max-width: 90vw;
+            max-height: 60vh;
+            object-fit: contain;
+            background: #000;
+        }
+
+        .info {
+            margin-top: 15px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.8;
+            border: 2px solid #666;
+        }
+
+        .algorithm-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(20, 20, 20, 0.5);
+            border-radius: 4px;
+            font-size: 13px;
+            color: #aaa;
+            max-width: 600px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🌀 Maze Generator</h1>
+
+    <div class="controls">
+        <label>
+            Algorithm:
+            <select id="algorithm">
+                <option value="recursive">Recursive Backtracker</option>
+                <option value="prim">Prim's Algorithm</option>
+                <option value="kruskal">Kruskal's Algorithm</option>
+                <option value="wilson">Wilson's Algorithm</option>
+                <option value="aldous">Aldous-Broder</option>
+                <option value="binary">Binary Tree</option>
+                <option value="sidewinder">Sidewinder</option>
+                <option value="huntandkill">Hunt-and-Kill</option>
+                <option value="growingtree-last">Growing Tree (Last)</option>
+                <option value="growingtree-random">Growing Tree (Random)</option>
+                <option value="growingtree-mix">Growing Tree (Mix)</option>
+            </select>
+        </label>
+        <label>
+            Width:
+            <input type="number" id="width" value="500" min="10" max="5000" step="1">
+        </label>
+        <label>
+            Height:
+            <input type="number" id="height" value="500" min="10" max="5000" step="1">
+        </label>
+        <button id="generateBtn">Generate Maze</button>
+        <button id="downloadBtn" disabled>Download PNG</button>
+        <button id="copyBase64Btn" disabled>Copy as Base64</button>
+    </div>
+
+    <div class="algorithm-info" id="algoInfo">
+        <strong>Recursive Backtracker:</strong> Creates long, winding passages with few dead ends. Very popular and
+        efficient.
+    </div>
+
+    <div class="progress" id="progressContainer" style="display: none;">
+        <div class="status" id="statusText">Initializing...</div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+        </div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <div class="info" id="info" style="display: none;">
+        <div><strong>Start:</strong> <span id="startPos"></span> <span style="color: #ff4444;">●</span></div>
+        <div><strong>Goal:</strong> <span id="goalPos"></span> <span style="color: #44ff44;">●</span></div>
+        <div><strong>Algorithm:</strong> <span id="algoName"></span></div>
+        <div><strong>Generation time:</strong> <span id="genTime"></span></div>
+        <div><strong>Solvable:</strong> <span id="solvable"></span></div>
+        <div><strong>Path length:</strong> <span id="pathLength"></span></div>
+    </div>
+
+    <script src="./scripts/gen.js"></script>
+</body>
+
+</html>
