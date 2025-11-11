@@ -77,6 +77,11 @@ urlBtn.addEventListener('click', () => {
     }
 });
 
+function getQueryParam(name) {
+    const params = new URLSearchParams(window.location.search);
+    return params.get(name);
+}
+
 window.addEventListener('DOMContentLoaded', () => {
     const url = getQueryParam('url');
     if (url) {
