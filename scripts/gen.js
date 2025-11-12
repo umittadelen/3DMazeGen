@@ -15,6 +15,7 @@ let maze = null;
 
 const algorithmDescriptions = {
     recursive: '<strong>Recursive Backtracker:</strong> Creates long, winding passages with few dead ends. Very popular and efficient.',
+    division: '<strong>Recursive Division:</strong> Creates mazes by recursively dividing the area with walls and adding passages. Results in a grid-like structure with many right angles.',
     prim: '<strong>Prim\'s Algorithm:</strong> Grows the maze from a single point, creating shorter passages with more branching.',
     kruskal: '<strong>Kruskal\'s Algorithm:</strong> Creates mazes by connecting separate trees, resulting in many short passages.',
     wilson: '<strong>Wilson\'s Algorithm:</strong> Creates unbiased mazes using loop-erased random walks. Slower but more uniform.',
@@ -412,6 +413,62 @@ async function growingTree(maze, startX, startY, width, height, selection = 'las
     }
 }
 
+async function divisionMaze(maze, width, height) {
+    // Fill everything with passages
+    maze.fill(W);
+
+    // Add black borders
+    for (let x = 0; x < width; x++) {
+        maze[0 * width + x] = B;           // top
+        maze[(height - 1) * width + x] = B; // bottom
+    }
+    for (let y = 0; y < height; y++) {
+        maze[y * width + 0] = B;           // left
+        maze[y * width + (width - 1)] = B; // right
+    }
+
+    const addWall = (x1, y1, x2, y2, horizontal) => {
+        if (horizontal) {
+            const wallY = y1 + 2 * Math.floor(Math.random() * Math.floor((y2 - y1 - 1) / 2)) + 1;
+            const gapX = x1 + 2 * Math.floor(Math.random() * Math.floor((x2 - x1)/2));
+            for (let x = x1; x < x2; x++) {
+                if (x !== gapX) maze[wallY * width + x] = B;
+            }
+            return wallY;
+        } else {
+            const wallX = x1 + 2 * Math.floor(Math.random() * Math.floor((x2 - x1 - 1) / 2)) + 1;
+            const gapY = y1 + 2 * Math.floor(Math.random() * Math.floor((y2 - y1)/2));
+            for (let y = y1; y < y2; y++) {
+                if (y !== gapY) maze[y * width + wallX] = B;
+            }
+            return wallX;
+        }
+    };
+
+    async function divide(x1, y1, x2, y2) {
+        const w = x2 - x1;
+        const h = y2 - y1;
+
+        if (w < 3 || h < 3) return;
+
+        const horizontal = (w < h);
+
+        if (horizontal) {
+            const wallY = addWall(x1, y1, x2, y2, true);
+            await divide(x1, y1, x2, wallY);
+            await divide(x1, wallY + 1, x2, y2);
+        } else {
+            const wallX = addWall(x1, y1, x2, y2, false);
+            await divide(x1, y1, wallX, y2);
+            await divide(wallX + 1, y1, x2, y2);
+        }
+
+        await new Promise(r => setTimeout(r, 0));
+    }
+
+    await divide(1, 1, width-1, height-1); // inner rectangle only
+}
+
 async function findFarthest(maze, start, width, height) {
     const visited = new Uint8Array(width * height);
     const queue = [[start, 0]];
@@ -557,6 +614,11 @@ generateBtn.addEventListener('click', async () => {
             break;
         case 'growingtree-mix':
             await growingTree(maze, startX, startY, width, height, 'mix');
+            break;
+        case 'division':
+            await divisionMaze(maze, width, height);
+            startX = 1;
+            startY = 1;
             break;
     }
 

@@ -22,8 +22,8 @@ let playerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
 
 let FOV = Math.PI / 3;
-const NUM_RAYS = 800;
-const MAX_DEPTH = 50;
+const NUM_RAYS = 500;
+const MAX_DEPTH = 20;
 const MOVE_SPEED = 0.025;
 const ROT_SPEED = 0.025;
 
@@ -40,6 +40,11 @@ resizeCanvas();
 
 function hideControls() {
     document.getElementById('controls').style.display = 'none';
+    info.style.display = 'none';
+    //show mobile controls if mobile
+    if (window.matchMedia("(pointer: coarse)").matches) {
+        document.getElementById('mobile-controls').style.display = 'flex';
+    }
     canvas.requestPointerLock();
 }
 
@@ -214,27 +219,57 @@ function checkGoal() {
     }
 }
 
+// OPTIMIZED: DDA ray casting algorithm
 function castRay(angle) {
-    const dx = Math.cos(angle);
-    const dy = Math.sin(angle);
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
 
-    let dist = 0;
+    let mapX = Math.floor(playerX);
+    let mapY = Math.floor(playerY);
+
+    const deltaDistX = Math.abs(1 / dirX);
+    const deltaDistY = Math.abs(1 / dirY);
+
+    let stepX, stepY;
+    let sideDistX, sideDistY;
+
+    if (dirX < 0) {
+        stepX = -1;
+        sideDistX = (playerX - mapX) * deltaDistX;
+    } else {
+        stepX = 1;
+        sideDistX = (mapX + 1.0 - playerX) * deltaDistX;
+    }
+
+    if (dirY < 0) {
+        stepY = -1;
+        sideDistY = (playerY - mapY) * deltaDistY;
+    } else {
+        stepY = 1;
+        sideDistY = (mapY + 1.0 - playerY) * deltaDistY;
+    }
+
     let hitType = 0;
+    let dist = 0;
 
-    for (let i = 0; i < MAX_DEPTH * 100; i++) {
-        dist += 0.01;
-        const x = playerX + dx * dist;
-        const y = playerY + dy * dist;
+    // DDA algorithm - steps through grid cells
+    for (let i = 0; i < MAX_DEPTH * 2; i++) {
+        if (sideDistX < sideDistY) {
+            sideDistX += deltaDistX;
+            mapX += stepX;
+            dist = sideDistX - deltaDistX;
+        } else {
+            sideDistY += deltaDistY;
+            mapY += stepY;
+            dist = sideDistY - deltaDistY;
+        }
 
-        const ix = Math.floor(x);
-        const iy = Math.floor(y);
-
-        if (ix < 0 || ix >= mazeWidth || iy < 0 || iy >= mazeHeight) {
+        if (mapX < 0 || mapX >= mazeWidth || mapY < 0 || mapY >= mazeHeight) {
             hitType = 0;
             break;
         }
 
-        const cell = maze[iy * mazeWidth + ix];
+        const cell = maze[mapY * mazeWidth + mapX];
         if (cell === 0) {
             hitType = 0;
             break;
@@ -248,13 +283,17 @@ function castRay(angle) {
 }
 
 function render() {
+    const skyColor = { r: 26, g: 26, b: 46 };  // #1a1a2e
+    const groundColor = { r: 15, g: 52, b: 96 }; // #0f3460
+
     const centerY = canvas.height / 2 + playerPitch * canvas.height / 2;
+
     // Sky
-    ctx.fillStyle = '#1a1a2e';
+    ctx.fillStyle = `rgb(${skyColor.r}, ${skyColor.g}, ${skyColor.b})`;
     ctx.fillRect(0, 0, canvas.width, centerY);
 
     // Ground
-    ctx.fillStyle = '#0f3460';
+    ctx.fillStyle = `rgb(${groundColor.r}, ${groundColor.g}, ${groundColor.b})`;
     ctx.fillRect(0, centerY, canvas.width, canvas.height - centerY);
 
     // Cast rays
@@ -263,24 +302,27 @@ function render() {
         const { dist, hitType } = castRay(rayAngle);
 
         const correctedDist = dist * Math.cos(rayAngle - playerAngle);
-        const wallHeight = canvas.height / correctedDist;
+        const planeDist = (canvas.width / 2) / Math.tan(FOV / 2);
+        const wallHeight = planeDist / correctedDist;
 
-        const fog = Math.min(1, correctedDist / MAX_DEPTH);
+        // Fog using smoother exponential falloff
+        const fog = 1 - Math.exp(-correctedDist / (MAX_DEPTH * 0.5));
 
         let r = 200, g = 200, b = 200;
         if (hitType === 3) {
             r = 0; g = 255; b = 0;
+        } else if (hitType === 4) {
+            r = 0; g = 100; b = 255;
         }
 
-        const fogColor = { r: 10, g: 20, b: 40 };
-        const fogFactor = Math.min(1, fog * 5);
-        r = Math.floor(r * (1 - fogFactor) + fogColor.r * fogFactor);
-        g = Math.floor(g * (1 - fogFactor) + fogColor.g * fogFactor);
-        b = Math.floor(b * (1 - fogFactor) + fogColor.b * fogFactor);
+        // Blend toward background color (same as sky/ground midpoint)
+        const fogColor = { r: 12, g: 25, b: 45 }; // blend target
+        r = Math.floor(r * (1 - fog) + fogColor.r * fog);
+        g = Math.floor(g * (1 - fog) + fogColor.g * fog);
+        b = Math.floor(b * (1 - fog) + fogColor.b * fog);
 
         ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
         const x = (i * canvas.width) / NUM_RAYS;
-        const centerY = canvas.height / 2 + playerPitch * canvas.height / 2;
         const y = centerY - wallHeight / 2;
         ctx.fillRect(x, y, canvas.width / NUM_RAYS + 1, wallHeight);
     }
@@ -397,8 +439,6 @@ canvas.addEventListener('click', () => {
     if (!mouseLocked) canvas.requestPointerLock();
 });
 
-
-
 document.addEventListener('mousemove', (e) => {
     if (mouseLocked) {
         playerAngle += e.movementX * 0.002;
@@ -409,6 +449,29 @@ document.addEventListener('mousemove', (e) => {
     }
 });
 
+// Mobile controls logic
+document.querySelectorAll('#mobile-controls .btn').forEach(btn => {
+    const key = btn.dataset.key;
+    if (!key) return;
+
+    const start = e => {
+        e.preventDefault();
+        keys[key.toLowerCase()] = true;
+        keys[key] = true;
+    };
+    const end = e => {
+        e.preventDefault();
+        keys[key.toLowerCase()] = false;
+        keys[key] = false;
+    };
+
+    btn.addEventListener('touchstart', start);
+    btn.addEventListener('touchend', end);
+    btn.addEventListener('mousedown', start);
+    btn.addEventListener('mouseup', end);
+});
+
+
 // Clear all keys when window loses focus or pointer lock is lost
 window.addEventListener('blur', () => {
     Object.keys(keys).forEach(key => keys[key] = false);
@@ -418,7 +481,6 @@ window.addEventListener('blur', () => {
 document.addEventListener('pointerlockchange', () => {
     mouseLocked = document.pointerLockElement === canvas;
     if (!mouseLocked) {
-        // Clear all keys when pointer lock is lost
         Object.keys(keys).forEach(key => keys[key] = false);
         running = false;
     }

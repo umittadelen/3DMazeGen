@@ -129,8 +129,8 @@
             border: 1px solid #666;
             image-rendering: pixelated;
             image-rendering: crisp-edges;
-            max-width: 90vw;
-            max-height: 60vh;
+            max-width: 600px;
+            max-height: 600px;
             object-fit: contain;
             background: #000;
         }
@@ -165,6 +165,7 @@
             Algorithm:
             <select id="algorithm">
                 <option value="recursive">Recursive Backtracker</option>
+                <option value="division">Recursive Division</option>
                 <option value="prim">Prim's Algorithm</option>
                 <option value="kruskal">Kruskal's Algorithm</option>
                 <option value="wilson">Wilson's Algorithm</option>
@@ -179,11 +180,11 @@
         </label>
         <label>
             Width:
-            <input type="number" id="width" value="500" min="10" max="5000" step="1">
+            <input type="number" id="width" value="100" min="10" step="1">
         </label>
         <label>
             Height:
-            <input type="number" id="height" value="500" min="10" max="5000" step="1">
+            <input type="number" id="height" value="100" min="10" step="1">
         </label>
         <button id="generateBtn">Generate Maze</button>
         <button id="downloadBtn" disabled>Download PNG</button>
