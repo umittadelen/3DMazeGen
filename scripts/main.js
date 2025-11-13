@@ -1,11 +1,31 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+let minimap = document.getElementById('minimap');
+let minimapCtx = null;
 const info = document.getElementById('info');
 const upload = document.getElementById('upload');
 const urlBtn = document.getElementById('urlBtn');
 const urlInput = document.getElementById('urlInput');
 const base64Btn = document.getElementById('base64Btn');
 const base64Input = document.getElementById('base64Input');
+
+const MINIMAP_SIZE = 150;
+const MINIMAP_RANGE = 5; // How many maze cells to show around player
+
+// Create minimap if it doesn't exist
+if (!minimap) {
+    minimap = document.createElement('canvas');
+    minimap.id = 'minimap';
+    minimap.style.position = 'fixed';
+    minimap.style.top = '20px';
+    minimap.style.right = '20px';
+    minimap.style.border = '2px solid #fff';
+    minimap.style.display = 'none';
+    minimap.style.zIndex = '1000';
+    minimap.style.background = '#000';
+    document.body.appendChild(minimap);
+}
+minimapCtx = minimap.getContext('2d');
 
 let maze = null;
 let mazeWidth = 0;
@@ -17,6 +37,7 @@ let goalX = 0;
 let goalY = 0;
 let won = false;
 let running = false;
+let minimapVisible = false;
 
 let playerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
@@ -33,6 +54,8 @@ let mouseLocked = false;
 function resizeCanvas() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    minimap.width = MINIMAP_SIZE;
+    minimap.height = MINIMAP_SIZE;
 }
 
 window.addEventListener('resize', resizeCanvas);
@@ -41,10 +64,6 @@ resizeCanvas();
 function hideControls() {
     document.getElementById('controls').style.display = 'none';
     info.style.display = 'none';
-    //show mobile controls if mobile
-    if (window.matchMedia("(pointer: coarse)").matches) {
-        document.getElementById('mobile-controls').style.display = 'flex';
-    }
     canvas.requestPointerLock();
 }
 
@@ -251,6 +270,8 @@ function castRay(angle) {
 
     let hitType = 0;
     let dist = 0;
+    let hitX = playerX;
+    let hitY = playerY;
 
     // DDA algorithm - steps through grid cells
     for (let i = 0; i < MAX_DEPTH * 2; i++) {
@@ -266,20 +287,26 @@ function castRay(angle) {
 
         if (mapX < 0 || mapX >= mazeWidth || mapY < 0 || mapY >= mazeHeight) {
             hitType = 0;
+            hitX = playerX + dirX * dist;
+            hitY = playerY + dirY * dist;
             break;
         }
 
         const cell = maze[mapY * mazeWidth + mapX];
         if (cell === 0) {
             hitType = 0;
+            hitX = playerX + dirX * dist;
+            hitY = playerY + dirY * dist;
             break;
         } else if (cell === 3) {
             hitType = 3;
+            hitX = playerX + dirX * dist;
+            hitY = playerY + dirY * dist;
             break;
         }
     }
 
-    return { dist, hitType };
+    return { dist, hitType, hitX, hitY };
 }
 
 function render() {
@@ -297,11 +324,13 @@ function render() {
     ctx.fillRect(0, centerY, canvas.width, canvas.height - centerY);
 
     // Cast rays
+    const rayData = [];
     for (let i = 0; i < NUM_RAYS; i++) {
         const rayAngle = playerAngle - FOV / 2 + (FOV * i) / NUM_RAYS;
-        const { dist, hitType } = castRay(rayAngle);
+        const result = castRay(rayAngle);
+        rayData.push(result);
 
-        const correctedDist = dist * Math.cos(rayAngle - playerAngle);
+        const correctedDist = result.dist * Math.cos(rayAngle - playerAngle);
         const planeDist = (canvas.width / 2) / Math.tan(FOV / 2);
         const wallHeight = planeDist / correctedDist;
 
@@ -309,9 +338,9 @@ function render() {
         const fog = 1 - Math.exp(-correctedDist / (MAX_DEPTH * 0.5));
 
         let r = 200, g = 200, b = 200;
-        if (hitType === 3) {
+        if (result.hitType === 3) {
             r = 0; g = 255; b = 0;
-        } else if (hitType === 4) {
+        } else if (result.hitType === 4) {
             r = 0; g = 100; b = 255;
         }
 
@@ -326,6 +355,73 @@ function render() {
         const y = centerY - wallHeight / 2;
         ctx.fillRect(x, y, canvas.width / NUM_RAYS + 1, wallHeight);
     }
+
+    return rayData;
+}
+
+function renderMinimap(rayData) {
+    minimapCtx.fillStyle = '#000';
+    minimapCtx.fillRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
+
+    const scale = MINIMAP_SIZE / (MINIMAP_RANGE * 2);
+    const centerX = MINIMAP_SIZE / 2;
+    const centerY = MINIMAP_SIZE / 2;
+
+    // Calculate visible bounds
+    const minX = Math.floor(playerX - MINIMAP_RANGE);
+    const maxX = Math.ceil(playerX + MINIMAP_RANGE);
+    const minY = Math.floor(playerY - MINIMAP_RANGE);
+    const maxY = Math.ceil(playerY + MINIMAP_RANGE);
+
+    // Draw maze cells in view
+    for (let my = minY; my <= maxY; my++) {
+        for (let mx = minX; mx <= maxX; mx++) {
+            if (mx < 0 || mx >= mazeWidth || my < 0 || my >= mazeHeight) continue;
+            
+            const cell = maze[my * mazeWidth + mx];
+            const screenX = centerX + (mx - playerX) * scale;
+            const screenY = centerY + (my - playerY) * scale;
+
+            if (cell === 0) {
+                minimapCtx.fillStyle = '#666';
+            } else if (cell === 3) {
+                minimapCtx.fillStyle = '#0f0';
+            } else {
+                minimapCtx.fillStyle = '#222';
+            }
+            minimapCtx.fillRect(screenX, screenY, scale + 1, scale + 1);
+        }
+    }
+
+    // Draw rays
+    minimapCtx.strokeStyle = 'rgba(255, 255, 0, 0.3)';
+    minimapCtx.lineWidth = 0.5;
+    for (let i = 0; i < rayData.length; i += 5) { // Draw every 5th ray for performance
+        const ray = rayData[i];
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(centerX, centerY);
+        const hitScreenX = centerX + (ray.hitX - playerX) * scale;
+        const hitScreenY = centerY + (ray.hitY - playerY) * scale;
+        minimapCtx.lineTo(hitScreenX, hitScreenY);
+        minimapCtx.stroke();
+    }
+
+    // Draw player direction indicator
+    minimapCtx.strokeStyle = '#fff';
+    minimapCtx.lineWidth = 2;
+    minimapCtx.beginPath();
+    minimapCtx.moveTo(centerX, centerY);
+    minimapCtx.lineTo(
+        centerX + Math.cos(playerAngle) * scale * 1.5,
+        centerY + Math.sin(playerAngle) * scale * 1.5
+    );
+    minimapCtx.stroke();
+
+    // Draw player
+    minimapCtx.fillStyle = '#f00';
+    minimapCtx.beginPath();
+    minimapCtx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+    minimapCtx.fill();
 }
 
 function applyIGNDithering(ctx, canvas) {
@@ -334,14 +430,26 @@ function applyIGNDithering(ctx, canvas) {
     const w = canvas.width;
     const h = canvas.height;
 
+    // Controls the look
+    const coherence = 0.02; // spatial coherence (lower = smoother)
+    const amplitude = 0.8;  // strength of dithering
+    const chaos = 0.3;      // white noise twist (0–1)
+
     for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
             const i = (y * w + x) * 4;
 
+            // --- coherent base noise
             const dot = x * 0.06711056 + y * 0.00583715;
-            let noise = 52.9829189 * (dot - Math.floor(dot));
-            noise = (noise - Math.floor(noise)) * 255 - 127.5;
-            const n = noise * 0.015;
+            let base = 52.9829189 * (dot - Math.floor(dot));
+            base = (base - Math.floor(base)) * 2 - 1; // -1..1
+            const coherent = base * amplitude;
+
+            // --- chaotic flicker
+            const white = (Math.random() * 2 - 1) * amplitude * chaos;
+
+            // combined noise, scaled to avoid visible pixel patterning
+            const n = (coherent + white) * 255 * coherence;
 
             data[i] = Math.max(0, Math.min(255, data[i] + n));
             data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + n));
@@ -415,8 +523,10 @@ function update() {
 function gameLoop() {
     update();
     if (needsRender) {
-        render();
+        const rayData = render();
         applyIGNDithering(ctx, canvas);
+        if (minimapVisible) renderMinimap(rayData);
+        needsRender = false;
     }
     requestAnimationFrame(gameLoop);
 }
@@ -426,6 +536,11 @@ document.addEventListener('keydown', (e) => {
     keys[e.key] = true;
 
     if (e.key === "x") running = true;
+
+    if (e.key.toLowerCase() === 'm') {
+        minimapVisible = !minimapVisible;
+        minimap.style.display = minimapVisible ? 'block' : 'none';
+    }
 });
 
 document.addEventListener('keyup', (e) => {
