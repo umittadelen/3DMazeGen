@@ -449,31 +449,6 @@ document.addEventListener('mousemove', (e) => {
     }
 });
 
-document.querySelectorAll('#mobile-controls .btn').forEach(btn => {
-    const key = btn.dataset.key;
-    if (!key) return;
-
-    const start = e => {
-        e.preventDefault();
-        keys[key.toLowerCase()] = true;
-        keys[key] = true;
-
-        if (key.toLowerCase() === "x") running = true;
-    };
-    const end = e => {
-        e.preventDefault();
-        keys[key.toLowerCase()] = false;
-        keys[key] = false;
-
-        if (key.toLowerCase() === "x") running = false;
-    };
-
-    btn.addEventListener('touchstart', start);
-    btn.addEventListener('touchend', end);
-    btn.addEventListener('mousedown', start);
-    btn.addEventListener('mouseup', end);
-});
-
 // Clear all keys when window loses focus or pointer lock is lost
 window.addEventListener('blur', () => {
     Object.keys(keys).forEach(key => keys[key] = false);

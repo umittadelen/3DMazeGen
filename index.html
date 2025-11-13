@@ -130,62 +130,6 @@
                 opacity: 0.5;
             }
         }
-
-        #mobile-controls {
-            display: none;
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-            z-index: 1000;
-            user-select: none;
-        }
-
-        #grid {
-            display: grid;
-            grid-template-columns: repeat(5, 60px);
-            grid-template-rows: repeat(2, 60px);
-            gap: 5px;
-        }
-
-        .btn {
-            width: 60px;
-            height: 60px;
-            font-size: 24px;
-            background: rgba(255, 255, 255, 0.2);
-            border: 1px solid #fff;
-            border-radius: 10px;
-            color: #fff;
-        }
-
-        .btn:active {
-            background: rgba(255, 255, 255, 0.5);
-        }
-
-        .empty {
-            background: transparent;
-            border: none;
-            pointer-events: none;
-        }
-
-        #run-btn {
-            width: 320px;
-            height: 50px;
-            font-size: 20px;
-            border-radius: 12px;
-        }
-
-        /* Hide mobile controls on large screens (PC) */
-        @media (pointer: fine),
-        (min-width: 800px) {
-            #mobile-controls {
-                display: none;
-            }
-        }
     </style>
 </head>
 
@@ -205,26 +149,6 @@
         </div>
         <canvas id="canvas" width="800" height="600"></canvas>
         <div id="info">Load a maze image to start. Use WASD or Arrow keys to move, Mouse to look around.</div>
-    </div>
-
-    <div id="mobile-controls">
-        <div id="grid">
-            <!-- Row 1 -->
-            <button class="btn empty"></button>
-            <button class="btn empty"></button>
-            <button class="btn" data-key="w">↑</button>
-            <button class="btn empty"></button>
-            <button class="btn empty"></button>
-
-            <!-- Row 2 -->
-            <button class="btn" data-key="ArrowLeft">⟲</button>
-            <button class="btn" data-key="a">←</button>
-            <button class="btn" data-key="s">↓</button>
-            <button class="btn" data-key="d">→</button>
-            <button class="btn" data-key="ArrowRight">⟳</button>
-        </div>
-
-        <button class="btn" data-key="x" id="run-btn">Run</button>
     </div>
 
     <script src="./scripts/main.js"></script>
