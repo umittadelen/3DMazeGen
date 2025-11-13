@@ -413,46 +413,49 @@ async function growingTree(maze, startX, startY, width, height, selection = 'las
     }
 }
 
-async function divisionMaze(maze, width, height) {
-    // Fill everything with passages
+async function divisionMaze(maze, width, height, onProgress) {
     maze.fill(W);
 
-    // Add black borders
+    // Add borders
     for (let x = 0; x < width; x++) {
-        maze[0 * width + x] = B;           // top
-        maze[(height - 1) * width + x] = B; // bottom
+        maze[x] = B;
+        maze[(height - 1) * width + x] = B;
     }
     for (let y = 0; y < height; y++) {
-        maze[y * width + 0] = B;           // left
-        maze[y * width + (width - 1)] = B; // right
+        maze[y * width] = B;
+        maze[y * width + (width - 1)] = B;
     }
 
-    const addWall = (x1, y1, x2, y2, horizontal) => {
+    const total = width * height;
+    let counter = 0;
+    const yieldEvery = 200; // adjust for speed vs responsiveness
+
+    function addWall(x1, y1, x2, y2, horizontal) {
         if (horizontal) {
             const wallY = y1 + 2 * Math.floor(Math.random() * Math.floor((y2 - y1 - 1) / 2)) + 1;
-            const gapX = x1 + 2 * Math.floor(Math.random() * Math.floor((x2 - x1)/2));
+            const gapX = x1 + 2 * Math.floor(Math.random() * Math.floor((x2 - x1) / 2));
             for (let x = x1; x < x2; x++) {
                 if (x !== gapX) maze[wallY * width + x] = B;
+                counter++;
             }
             return wallY;
         } else {
             const wallX = x1 + 2 * Math.floor(Math.random() * Math.floor((x2 - x1 - 1) / 2)) + 1;
-            const gapY = y1 + 2 * Math.floor(Math.random() * Math.floor((y2 - y1)/2));
+            const gapY = y1 + 2 * Math.floor(Math.random() * Math.floor((y2 - y1) / 2));
             for (let y = y1; y < y2; y++) {
                 if (y !== gapY) maze[y * width + wallX] = B;
+                counter++;
             }
             return wallX;
         }
-    };
+    }
 
     async function divide(x1, y1, x2, y2) {
         const w = x2 - x1;
         const h = y2 - y1;
-
         if (w < 3 || h < 3) return;
 
         const horizontal = (w < h);
-
         if (horizontal) {
             const wallY = addWall(x1, y1, x2, y2, true);
             await divide(x1, y1, x2, wallY);
@@ -463,10 +466,15 @@ async function divisionMaze(maze, width, height) {
             await divide(wallX + 1, y1, x2, y2);
         }
 
-        await new Promise(r => setTimeout(r, 0));
+        // yield occasionally
+        if (counter % yieldEvery === 0) {
+            if (onProgress) onProgress(Math.min(counter / total, 1));
+            await new Promise(r => setTimeout(r, 0));
+        }
     }
 
-    await divide(1, 1, width-1, height-1); // inner rectangle only
+    await divide(1, 1, width - 1, height - 1);
+    if (onProgress) onProgress(1);
 }
 
 async function findFarthest(maze, start, width, height) {
