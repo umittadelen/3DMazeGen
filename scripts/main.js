@@ -64,7 +64,6 @@ resizeCanvas();
 function hideControls() {
     document.getElementById('controls').style.display = 'none';
     info.style.display = 'none';
-    canvas.requestPointerLock();
 }
 
 function showError(message) {
@@ -234,7 +233,8 @@ function checkGoal() {
     const dy = playerY - goalY;
     if (dx * dx + dy * dy < 0.5) {
         won = true;
-        info.innerHTML = '<span class="win">🎉 YOU WON! 🎉</span>';
+        info.innerHTML = '<span class="win">🎉 YOU WON! 🎉</span><br><span>Refresh the page to go back</>';
+        info.style.display = 'block';
     }
 }
 
