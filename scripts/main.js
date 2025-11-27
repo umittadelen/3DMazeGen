@@ -6,8 +6,26 @@ const info = document.getElementById('info');
 const upload = document.getElementById('upload');
 const urlBtn = document.getElementById('urlBtn');
 const urlInput = document.getElementById('urlInput');
-const base64Btn = document.getElementById('base64Btn');
-const base64Input = document.getElementById('base64Input');
+
+// ---- ORIENTATION LOCK ----
+function checkOrientation() {
+    const warning = document.getElementById('portrait-warning');
+    const container = document.getElementById('container');
+    
+    if (window.innerHeight > window.innerWidth) {
+        // Portrait mode
+        warning.classList.add('show');
+        container.style.display = 'none';
+    } else {
+        // Landscape mode
+        warning.classList.remove('show');
+        container.style.display = 'block';
+    }
+}
+
+window.addEventListener('orientationchange', checkOrientation);
+window.addEventListener('resize', checkOrientation);
+checkOrientation();
 
 const MINIMAP_SIZE = 150;
 const MINIMAP_RANGE = 5; // How many maze cells to show around player
@@ -38,6 +56,7 @@ let goalY = 0;
 let won = false;
 let running = false;
 let minimapVisible = false;
+let gameLoopId = null;
 
 let playerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
@@ -50,6 +69,8 @@ const ROT_SPEED = 0.025;
 
 const keys = {};
 let mouseLocked = false;
+let ignoreMouseMovement = false;
+let pointerLockPending = false;  // Flag to prevent simultaneous lock/unlock requests
 
 function resizeCanvas() {
     canvas.width = window.innerWidth;
@@ -64,6 +85,7 @@ resizeCanvas();
 function hideControls() {
     document.getElementById('controls').style.display = 'none';
     info.style.display = 'none';
+    document.querySelector('.joystick_container').classList.add('active');
 }
 
 function showError(message) {
@@ -78,23 +100,62 @@ upload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-            loadMaze(img);
-            hideControls();
+    if (file.name.endsWith('.maze')) {
+        // Load .maze format
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const arrayBuffer = event.target.result;
+                
+                // Validate that we got data
+                if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+                    showError('.maze file is empty');
+                    return;
+                }
+                
+                loadMazeFormat(arrayBuffer);
+                hideControls();
+            } catch (err) {
+                console.error('Maze load error:', err);
+                showError('Failed to load .maze file: ' + err.message);
+            }
         };
-        img.onerror = () => showError('Failed to load image file');
-        img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+        reader.onerror = (err) => {
+            console.error('FileReader error:', err);
+            showError('Failed to read .maze file: ' + err);
+        };
+        reader.readAsArrayBuffer(file);
+    } else {
+        // Load image format (PNG, JPG, etc)
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                try {
+                    loadMaze(img);
+                    hideControls();
+                } catch (err) {
+                    console.error('Image load error:', err);
+                    showError('Failed to load image: ' + err.message);
+                }
+            };
+            img.onerror = (err) => {
+                console.error('Image load error:', err);
+                showError('Failed to load image file');
+            };
+            img.src = event.target.result;
+        };
+        reader.onerror = (err) => {
+            console.error('FileReader error:', err);
+            showError('Failed to read file: ' + err);
+        };
+        reader.readAsDataURL(file);
+    }
 });
 
 // URL upload
 urlBtn.addEventListener('click', () => {
     urlInput.style.display = urlInput.style.display === 'none' ? 'block' : 'none';
-    base64Input.style.display = 'none';
     if (urlInput.style.display === 'block') {
         urlInput.focus();
     }
@@ -138,39 +199,13 @@ urlInput.addEventListener('keypress', (e) => {
     }
 });
 
-// Base64 upload
-base64Btn.addEventListener('click', () => {
-    base64Input.style.display = base64Input.style.display === 'none' ? 'block' : 'none';
-    urlInput.style.display = 'none';
-    if (base64Input.style.display === 'block') {
-        base64Input.focus();
-    }
-});
-
-base64Input.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        let base64 = base64Input.value.trim();
-        if (!base64) {
-            showError('Please paste a base64 string');
-            return;
-        }
-
-        // Add data URL prefix if not present
-        if (!base64.startsWith('data:')) {
-            base64 = 'data:image/png;base64,' + base64;
-        }
-
-        const img = new Image();
-        img.onload = () => {
-            loadMaze(img);
-            hideControls();
-        };
-        img.onerror = () => showError('Invalid base64 image data');
-        img.src = base64;
-    }
-});
-
 function loadMaze(img) {
+    // Stop previous game loop
+    if (gameLoopId) {
+        cancelAnimationFrame(gameLoopId);
+        gameLoopId = null;
+    }
+
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = img.width;
     tempCanvas.height = img.height;
@@ -217,8 +252,86 @@ function loadMaze(img) {
     }
 
     won = false;
+    playerAngle = 0;
+    playerPitch = 0;
+    needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
-    requestAnimationFrame(gameLoop);
+    gameLoopId = requestAnimationFrame(gameLoop);
+}
+
+function loadMazeFormat(arrayBuffer) {
+    // Stop previous game loop
+    if (gameLoopId) {
+        cancelAnimationFrame(gameLoopId);
+        gameLoopId = null;
+    }
+
+    // Validate buffer size
+    if (arrayBuffer.byteLength < 4) {
+        showError('.maze file is corrupted (too small)');
+        return;
+    }
+
+    const view = new DataView(arrayBuffer);
+    mazeWidth = view.getUint16(0, true);
+    mazeHeight = view.getUint16(2, true);
+    
+    // Validate dimensions
+    if (mazeWidth < 3 || mazeHeight < 3 || mazeWidth > 50000 || mazeHeight > 50000) {
+        showError('.maze file has invalid dimensions: ' + mazeWidth + 'x' + mazeHeight);
+        return;
+    }
+    
+    const expectedSize = 4 + Math.ceil(mazeWidth * mazeHeight * 2 / 8);
+    if (arrayBuffer.byteLength < expectedSize) {
+        showError('.maze file is truncated or corrupted');
+        return;
+    }
+    
+    const data = new Uint8Array(arrayBuffer, 4);
+    
+    maze = new Uint8Array(mazeWidth * mazeHeight);
+    
+    let foundStart = false;
+    let foundGoal = false;
+    let bitIndex = 0;
+    
+    // Unpack cells from .maze format (2 bits per cell)
+    for (let i = 0; i < mazeWidth * mazeHeight; i++) {
+        const byteIndex = bitIndex >> 3;
+        if (byteIndex >= data.length) {
+            showError('.maze file data is corrupted');
+            return;
+        }
+        
+        const offset = 6 - (bitIndex % 8);
+        const cell = (data[byteIndex] >> offset) & 0b11;
+        bitIndex += 2;
+        
+        maze[i] = cell;
+        
+        if (cell === 2) { // Start (red)
+            playerX = (i % mazeWidth) + 0.5;
+            playerY = Math.floor(i / mazeWidth) + 0.5;
+            foundStart = true;
+        } else if (cell === 3) { // Goal (green)
+            goalX = (i % mazeWidth) + 0.5;
+            goalY = Math.floor(i / mazeWidth) + 0.5;
+            foundGoal = true;
+        }
+    }
+    
+    if (!foundStart || !foundGoal) {
+        showError('Invalid .maze file: missing start or goal');
+        return;
+    }
+    
+    won = false;
+    playerAngle = 0;
+    playerPitch = 0;
+    needsRender = true;
+    info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
+    gameLoopId = requestAnimationFrame(gameLoop);
 }
 
 function isWall(x, y) {
@@ -233,9 +346,64 @@ function checkGoal() {
     const dy = playerY - goalY;
     if (dx * dx + dy * dy < 0.5) {
         won = true;
-        info.innerHTML = '<span class="win">🎉 YOU WON! 🎉</span><br><span>Refresh the page to go back</>';
-        info.style.display = 'block';
+        
+        // Unlock cursor when winning
+        if (mouseLocked) {
+            document.exitPointerLock();
+            mouseLocked = false;
+        }
+        
+        // Clear input states
+        Object.keys(keys).forEach(key => keys[key] = false);
+        running = false;
+        
+        const winModal = document.getElementById('winModal');
+        winModal.classList.add('show');
     }
+}
+
+function goBack() {
+    // Exit pointer lock if active
+    if (mouseLocked) {
+        document.exitPointerLock();
+        mouseLocked = false;
+    }
+    
+    // Clear all input states
+    Object.keys(keys).forEach(key => keys[key] = false);
+    running = false;
+    
+    // Hide win modal
+    const winModal = document.getElementById('winModal');
+    winModal.classList.remove('show');
+    
+    // Reset game state
+    won = false;
+    maze = null;
+    mazeWidth = 0;
+    mazeHeight = 0;
+    playerX = 0;
+    playerY = 0;
+    playerAngle = 0;
+    playerPitch = 0;
+    goalX = 0;
+    goalY = 0;
+    
+    // Stop current game loop
+    if (gameLoopId) {
+        cancelAnimationFrame(gameLoopId);
+        gameLoopId = null;
+    }
+    
+    // Reset UI - show controls again
+    document.getElementById('controls').style.display = 'flex';
+    document.querySelector('.joystick_container').classList.remove('active');
+    info.innerHTML = 'Load a maze image to start. Use WASD or Arrow keys to move, Mouse to look around.';
+    info.style.display = 'block';
+    
+    // Clear canvas
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 // OPTIMIZED: DDA ray casting algorithm
@@ -489,6 +657,13 @@ function update() {
         moveY += Math.sin(playerAngle + Math.PI / 2) * speed;
     }
 
+    // Normalize movement to prevent diagonal speed boost
+    const moveMagnitude = Math.hypot(moveX, moveY);
+    if (moveMagnitude > speed) {
+        moveX = (moveX / moveMagnitude) * speed;
+        moveY = (moveY / moveMagnitude) * speed;
+    }
+
     if (keys['ArrowLeft']) {
         playerAngle -= ROT_SPEED;
         movedOrRotated = true;
@@ -528,7 +703,7 @@ function gameLoop() {
         if (minimapVisible) renderMinimap(rayData);
         needsRender = false;
     }
-    requestAnimationFrame(gameLoop);
+    gameLoopId = requestAnimationFrame(gameLoop);
 }
 
 document.addEventListener('keydown', (e) => {
@@ -551,11 +726,18 @@ document.addEventListener('keyup', (e) => {
 });
 
 canvas.addEventListener('click', () => {
-    if (!mouseLocked) canvas.requestPointerLock();
+    // Only request pointer lock on desktop (non-touch) devices
+    if (!isTouchDevice() && !mouseLocked && !pointerLockPending) {
+        pointerLockPending = true;
+        canvas.requestPointerLock().catch(() => {
+            pointerLockPending = false;
+        });
+    }
 });
 
 document.addEventListener('mousemove', (e) => {
-    if (mouseLocked) {
+    // Only process mouse movement if pointer lock is active AND we're not exiting
+    if (mouseLocked && document.pointerLockElement === canvas && !ignoreMouseMovement) {
         playerAngle += e.movementX * 0.002;
         playerPitch -= e.movementY * 0.004;
         if (playerPitch > MAX_PITCH) playerPitch = MAX_PITCH;
@@ -571,10 +753,40 @@ window.addEventListener('blur', () => {
 });
 
 document.addEventListener('pointerlockchange', () => {
-    mouseLocked = document.pointerLockElement === canvas;
-    if (!mouseLocked) {
+    const isLocked = document.pointerLockElement === canvas;
+    pointerLockPending = false;  // Clear the pending flag
+    
+    if (isLocked) {
+        // Entering pointer lock
+        mouseLocked = true;
+        ignoreMouseMovement = false;
+    } else {
+        // Exiting pointer lock - set flag to prevent stray mouse movements
+        if (mouseLocked) {
+            ignoreMouseMovement = true;
+            setTimeout(() => { ignoreMouseMovement = false; }, 50);
+        }
+        mouseLocked = false;
         Object.keys(keys).forEach(key => keys[key] = false);
         running = false;
+    }
+});
+
+// Handle ESC key to exit pointer lock cleanly
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mouseLocked && !pointerLockPending) {
+        ignoreMouseMovement = true;  // Prevent final mouse movement from being processed
+        pointerLockPending = true;  // Prevent new lock requests during exit
+        document.exitPointerLock();
+        mouseLocked = false;
+        Object.keys(keys).forEach(key => keys[key] = false);
+        running = false;
+        // Reset the flags after a longer delay to catch all stray mouse events
+        setTimeout(() => { 
+            ignoreMouseMovement = false;
+            pointerLockPending = false;
+        }, 50);
+        e.preventDefault();
     }
 });
 
@@ -620,13 +832,16 @@ function startJoystick(j, e) {
     j.startY = t.pageY;
 
     j.base.style.display = "block";
-    j.base.style.left = j.startX + "px";
-    j.base.style.top = j.startY + "px";
+    j.base.style.left = (j.startX - 75) + "px";
+    j.base.style.top = (j.startY - 75) + "px";
+    j.base.classList.add("active");
 
     j.pointer.style.left = "50%";
     j.pointer.style.top = "50%";
 
     j.active = true;
+    
+    e.preventDefault();
 }
 
 function updateJoystick(j, e) {
@@ -638,7 +853,7 @@ function updateJoystick(j, e) {
     const dx = t.pageX - j.startX;
     const dy = t.pageY - j.startY;
 
-    const radius = 70;
+    const radius = 75;
     const dist = Math.min(Math.hypot(dx, dy), radius);
 
     const angle = Math.atan2(dy, dx);
@@ -646,10 +861,10 @@ function updateJoystick(j, e) {
     const px = Math.cos(angle) * dist;
     const py = Math.sin(angle) * dist;
 
-    j.pointer.style.left = 70 + px + "px";
-    j.pointer.style.top = 70 + py + "px";
+    j.pointer.style.left = (50 + (px / radius) * 50) + "%";
+    j.pointer.style.top = (50 + (py / radius) * 50) + "%";
 
-    const dead = 20;
+    const dead = 15;
 
     // --- left joystick → WSAD ---
     if (j === joysticks.left) {
@@ -674,7 +889,10 @@ function endJoystick(j, e) {
 
     j.active = false;
     j.id = null;
+    j.base.classList.remove("active");
     j.base.style.display = "none";
+    j.pointer.style.left = "50%";
+    j.pointer.style.top = "50%";
 
     // Clear all keys for that joystick
     if (j === joysticks.left) {
@@ -694,15 +912,29 @@ function endJoystick(j, e) {
 
 // ---- EVENTS ----
 Object.values(joysticks).forEach(j => {
-    j.hitbox.addEventListener("touchstart", e => startJoystick(j, e));
+    j.hitbox.addEventListener("touchstart", e => {
+        e.preventDefault();
+        startJoystick(j, e);
+    }, { passive: false });
+    
+    j.hitbox.addEventListener("touchmove", e => {
+        e.preventDefault();
+        updateJoystick(j, e);
+    }, { passive: false });
+    
+    j.hitbox.addEventListener("touchend", e => {
+        e.preventDefault();
+        endJoystick(j, e);
+    }, { passive: false });
 });
 
-window.addEventListener("touchmove", e => {
-    updateJoystick(joysticks.left, e);
-    updateJoystick(joysticks.right, e);
-}, { passive: false });
+// Disable joystick on desktop (non-touch devices)
+const isTouchDevice = () => {
+    return (('ontouchstart' in window) ||
+            (navigator.maxTouchPoints > 0) ||
+            (navigator.msMaxTouchPoints > 0));
+};
 
-window.addEventListener("touchend", e => {
-    endJoystick(joysticks.left, e);
-    endJoystick(joysticks.right, e);
-});
+if (!isTouchDevice()) {
+    document.querySelector('.joystick_container').style.display = 'none';
+}

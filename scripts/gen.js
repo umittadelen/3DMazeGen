@@ -1,8 +1,8 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: false });
 const generateBtn = document.getElementById('generateBtn');
-const downloadBtn = document.getElementById('downloadBtn');
-const copyBase64Btn = document.getElementById('copyBase64Btn');
+const downloadPngBtn = document.getElementById('downloadPngBtn');
+const downloadMazeBtn = document.getElementById('downloadMazeBtn');
 const progressContainer = document.getElementById('progressContainer');
 const progressFill = document.getElementById('progressFill');
 const statusText = document.getElementById('statusText');
@@ -12,6 +12,8 @@ const algoInfo = document.getElementById('algoInfo');
 
 const B = 0, W = 1, R = 2, G = 3;
 let maze = null;
+let mazeWidth = 0;
+let mazeHeight = 0;
 
 const algorithmDescriptions = {
     recursive: '<strong>Recursive Backtracker:</strong> Creates long, winding passages with few dead ends. Very popular and efficient.',
@@ -561,8 +563,8 @@ function renderMaze(maze, width, height) {
 generateBtn.addEventListener('click', async () => {
     const startTime = performance.now();
     generateBtn.disabled = true;
-    downloadBtn.disabled = true;
-    copyBase64Btn.disabled = true;
+    downloadPngBtn.disabled = true;
+    downloadMazeBtn.disabled = true;
     progressContainer.style.display = 'block';
     info.style.display = 'none';
 
@@ -571,6 +573,10 @@ generateBtn.addEventListener('click', async () => {
 
     if (width % 2 === 0) width++;
     if (height % 2 === 0) height++;
+
+    // Store dimensions globally for download handlers
+    mazeWidth = width;
+    mazeHeight = height;
 
     updateProgress(0, 100, 'Initializing maze...');
     maze = new Uint8Array(width * height).fill(B);
@@ -664,31 +670,115 @@ generateBtn.addEventListener('click', async () => {
 
     progressContainer.style.display = 'none';
     generateBtn.disabled = false;
-    downloadBtn.disabled = false;
-    copyBase64Btn.disabled = false;
+    downloadPngBtn.disabled = false;
+    downloadMazeBtn.disabled = false;
 });
 
-downloadBtn.addEventListener('click', () => {
+downloadPngBtn.addEventListener('click', () => {
+    if (!maze) {
+        alert('Generate a maze first!');
+        return;
+    }
+    const algorithm = algoSelect.value;
+    const filename = `${algorithm}-${mazeWidth}-${mazeHeight}.png`;
+    
     const link = document.createElement('a');
-    link.download = 'maze.png';
+    link.download = filename;
     link.href = canvas.toDataURL();
     link.click();
 });
 
-copyBase64Btn.addEventListener('click', async () => {
-    try {
-        const dataUrl = canvas.toDataURL('image/png');
-        const base64 = dataUrl.split(',')[1];
-        await navigator.clipboard.writeText(base64);
-
-        const originalText = copyBase64Btn.textContent;
-        copyBase64Btn.textContent = '✓ Copied!';
-        copyBase64Btn.style.background = 'rgba(33, 150, 243, 0.8)';
-        setTimeout(() => {
-            copyBase64Btn.textContent = originalText;
-            copyBase64Btn.style.background = 'rgba(70, 70, 70, 0.8)';
-        }, 2000);
-    } catch (err) {
-        alert('Failed to copy to clipboard: ' + err.message);
+downloadMazeBtn.addEventListener('click', () => {
+    if (!maze) {
+        alert('Generate a maze first!');
+        return;
     }
+    const algorithm = algoSelect.value;
+    const filename = `${algorithm}-${mazeWidth}-${mazeHeight}.maze`;
+    
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = createMazeFormat(maze, mazeWidth, mazeHeight);
+    link.click();
 });
+
+// ---- .MAZE FORMAT FUNCTIONS ----
+function createMazeFormat(cells, width, height) {
+    // Create header
+    const header = new Uint8Array(4);
+    const view = new DataView(header.buffer);
+    view.setUint16(0, width, true);
+    view.setUint16(2, height, true);
+
+    // Pack cells (2 bits per cell) into bytes
+    const dataBytes = Math.ceil(width * height * 2 / 8);
+    const dataArr = new Uint8Array(dataBytes);
+    let bitIndex = 0;
+    
+    for (let i = 0; i < cells.length; i++) {
+        const cell = cells[i] & 0b11;
+        const byteIndex = bitIndex >> 3;
+        const offset = 6 - (bitIndex % 8);
+        dataArr[byteIndex] |= cell << offset;
+        bitIndex += 2;
+    }
+
+    // Combine header and data
+    const result = new Uint8Array(4 + dataBytes);
+    result.set(header, 0);
+    result.set(dataArr, 4);
+
+    // Convert to blob URL for download
+    const blob = new Blob([result], { type: 'application/octet-stream' });
+    return URL.createObjectURL(blob);
+}
+
+function mazeToPNG(arrayBuffer, scale = 1) {
+    const view = new DataView(arrayBuffer);
+    const width = view.getUint16(0, true);
+    const height = view.getUint16(2, true);
+    const data = new Uint8Array(arrayBuffer, 4);
+    const totalCells = width * height;
+
+    const cellColors = [
+        [0, 0, 0],           // wall = black
+        [255, 255, 255],     // path = white
+        [255, 0, 0],         // start = red
+        [0, 255, 0]          // goal = green
+    ];
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(width, height);
+    
+    let bitIndex = 0;
+    for (let i = 0; i < totalCells; i++) {
+        const byteIndex = bitIndex >> 3;
+        const offset = 6 - (bitIndex % 8);
+        const cell = (data[byteIndex] >> offset) & 0b11;
+        bitIndex += 2;
+
+        const [r, g, b] = cellColors[cell];
+        const px = i * 4;
+        imgData.data[px] = r;
+        imgData.data[px + 1] = g;
+        imgData.data[px + 2] = b;
+        imgData.data[px + 3] = 255;
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+
+    if (scale > 1) {
+        const scaledCanvas = document.createElement('canvas');
+        scaledCanvas.width = width * scale;
+        scaledCanvas.height = height * scale;
+        const sctx = scaledCanvas.getContext('2d');
+        sctx.imageSmoothingEnabled = false;
+        sctx.drawImage(canvas, 0, 0, width * scale, height * scale);
+        return scaledCanvas.toDataURL("image/png");
+    }
+
+    return canvas.toDataURL("image/png");
+}

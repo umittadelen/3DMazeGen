@@ -1,258 +1,329 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-        <title>3D Maze Game</title>
-        <style>
-            body {
-                margin: 0;
-                padding: 0;
-                background: #000;
-                overflow: hidden;
-                height: 100vh;
-                width: 100vw;
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="screen-orientation" content="landscape" />
+    <title>3D Maze Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        #portrait-warning {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            color: #fff;
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-size: 24px;
+            font-family: Arial, sans-serif;
+        }
+
+        #portrait-warning.show {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            border: none;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            z-index: 0;
+            display: block;
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            z-index: 2;
+        }
+
+        #upload,
+        #urlBtn,
+        #genBtn {
+            padding: 8px 16px;
+            background: rgba(30, 30, 30, 0.8);
+            color: #fff;
+            border: 1px solid #666;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        #upload:hover,
+        #urlBtn:hover,
+        #genBtn:hover {
+            background: #383838;
+        }
+
+        #genBtn {
+            background: #335b33;
+        }
+
+        #genBtn:hover {
+            background: #437343;
+        }
+
+        #urlInput {
+            display: none;
+            padding: 6px;
+            width: 280px;
+            background: rgba(30, 30, 30, 0.9);
+            color: #fff;
+            border: 1px solid #666;
+            font-size: 12px;
+        }
+
+        #urlInput::placeholder {
+            color: #999;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        #info {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-size: 12px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 6px 12px;
+            border-radius: 4px;
+            z-index: 2;
+        }
+
+        #winModal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        #winModal.show {
+            display: flex;
+        }
+
+        #winModal .win-text {
+            color: #44ff44;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 0 0 20px #44ff44;
+            animation: pulse 0.6s infinite;
+        }
+
+        #winModal .win-subtext {
+            color: #aaa;
+            font-size: 18px;
+        }
+
+        #winModal #goBackBtn {
+            padding: 12px 30px;
+            background: #335b33;
+            color: #fff;
+            border: 2px solid #44ff44;
+            cursor: pointer;
+            font-size: 16px;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+        }
+
+        #winModal #goBackBtn:hover {
+            background: #437343;
+            box-shadow: 0 0 15px #44ff44;
+            transform: scale(1.05);
+        }
+
+        .error {
+            color: #f00;
+            font-size: 14px;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
             }
 
-            #container {
-                position: relative;
-                width: 100vw;
-                height: 100vh;
-                overflow: hidden;
+            50% {
+                opacity: 0.5;
             }
+        }
 
-            #canvas {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100vw;
-                height: 100vh;
-                border: none;
-                image-rendering: pixelated;
-                image-rendering: crisp-edges;
-                z-index: 0;
-                display: block;
-            }
+        .joystick_container {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none;
+        }
 
-            #controls {
-                position: absolute;
-                top: 20px;
-                left: 20px;
-                display: flex;
-                flex-direction: column;
-                gap: 10px;
-                z-index: 2;
-            }
+        .joystick_container.active {
+            pointer-events: auto;
+        }
 
-            #upload,
-            #urlBtn,
-            #base64Btn,
-            #genBtn {
-                padding: 10px 20px;
-                background: rgba(30, 30, 30, 0.8);
-                color: #fff;
-                border: 2px solid #666;
-                cursor: pointer;
-                font-size: 16px;
-            }
+        .left_joystick_hitbox,
+        .right_joystick_hitbox {
+            position: absolute;
+            width: 50%;
+            height: 100%;
+            touch-action: none;
+            pointer-events: none;
+        }
 
-            #upload:hover,
-            #urlBtn:hover,
-            #base64Btn:hover,
-            #genBtn:hover {
-                background: #383838;
-            }
+        .joystick_container.active .left_joystick_hitbox,
+        .joystick_container.active .right_joystick_hitbox {
+            pointer-events: auto;
+        }
 
-            #genBtn {
-                background: #335b33;
-            }
+        .left_joystick_hitbox {
+            left: 0;
+        }
 
-            #genBtn:hover {
-                background: #437343;
-            }
+        .right_joystick_hitbox {
+            right: 0;
+        }
 
-            #urlInput,
-            #base64Input {
-                display: none;
-                padding: 8px;
-                width: 300px;
-                background: rgba(30, 30, 30, 0.9);
-                color: #fff;
-                border: 2px solid #666;
-                font-size: 14px;
-            }
+        .left_joystick,
+        .right_joystick {
+            position: fixed;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            display: none;
+            z-index: 1;
+            box-shadow: none;
+            transition: opacity 0.1s ease-out;
+        }
 
-            #urlInput::placeholder,
-            #base64Input::placeholder {
-                color: #999;
-            }
+        .left_joystick.active,
+        .right_joystick.active {
+            background: rgba(255, 255, 255, 0.25);
+            border-color: rgba(255, 255, 255, 0.5);
+        }
 
-            .input-group {
-                display: flex;
-                flex-direction: column;
-                gap: 5px;
-            }
+        .left_joystick_pointer,
+        .right_joystick_pointer {
+            position: absolute;
+            width: 55px;
+            height: 55px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.6);
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: none;
+            transition: transform 0.05s linear;
+        }
+    </style>
 
-            #info {
-                position: absolute;
-                bottom: 20px;
-                left: 50%;
-                transform: translateX(-50%);
-                color: #fff;
-                font-size: 14px;
-                background: rgba(0, 0, 0, 0.5);
-                padding: 8px 16px;
-                border-radius: 8px;
-                z-index: 2;
-            }
+    <link rel="manifest" href="manifest.json" />
 
-            .win {
-                color: #0f0;
-                font-size: 24px;
-                font-weight: bold;
-                animation: pulse 1s infinite;
-            }
+    <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png" />
+    <link rel="apple-touch-icon" sizes="152x152" href="icons/icon-152.png" />
+    <link rel="apple-touch-icon" sizes="120x120" href="icons/icon-120.png" />
+    <link rel="apple-touch-icon" sizes="76x76" href="icons/icon-76.png" />
+    <link rel="apple-touch-icon" sizes="60x60" href="icons/icon-60.png" />
 
-            .error {
-                color: #f00;
-                font-size: 14px;
-            }
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+</head>
 
-            @keyframes pulse {
-                0%,
-                100% {
-                    opacity: 1;
-                }
-
-                50% {
-                    opacity: 0.5;
-                }
-            }
-
-            .joystick_container {
-                position: fixed;
-                inset: 0;
-                width: 100%;
-                height: 100%;
-            }
-
-            .left_joystick_hitbox,
-            .right_joystick_hitbox {
-                position: absolute;
-                width: 50%;
-                height: 100%;
-                touch-action: none;
-            }
-
-            .left_joystick_hitbox {
-                left: 0;
-            }
-            .right_joystick_hitbox {
-                right: 0;
-            }
-
-            .left_joystick,
-            .right_joystick {
-                position: absolute;
-                width: 140px;
-                height: 140px;
-                border-radius: 50%;
-                background: #ffffff30;
-                border: 2px solid #ffffff55;
-                display: none;
-                transform: translate(-50%, -50%);
-            }
-
-            .left_joystick_pointer,
-            .right_joystick_pointer {
-                position: absolute;
-                width: 60px;
-                height: 60px;
-                border-radius: 50%;
-                background: #ffffff80;
-                left: 50%;
-                top: 50%;
-                transform: translate(-50%, -50%);
-            }
-        </style>
-
-        <link rel="manifest" href="manifest.json" />
-
-        <link
-            rel="apple-touch-icon"
-            sizes="180x180"
-            href="icons/icon-180.png"
-        />
-        <link
-            rel="apple-touch-icon"
-            sizes="152x152"
-            href="icons/icon-152.png"
-        />
-        <link
-            rel="apple-touch-icon"
-            sizes="120x120"
-            href="icons/icon-120.png"
-        />
-        <link rel="apple-touch-icon" sizes="76x76" href="icons/icon-76.png" />
-        <link rel="apple-touch-icon" sizes="60x60" href="icons/icon-60.png" />
-
-        <meta name="theme-color" content="#000000" />
-        <meta
-            name="apple-mobile-web-app-status-bar-style"
-            content="black-translucent"
-        />
-    </head>
-
-    <body>
-        <div id="container">
-            <div id="controls">
-                <button id="genBtn" onclick="location.href='gen.html'">
-                    🎨 Generate Maze
-                </button>
-                <input type="file" id="upload" accept="image/*" />
-                <div class="input-group">
-                    <button id="urlBtn">Load from URL</button>
-                    <input
-                        type="text"
-                        id="urlInput"
-                        placeholder="Enter image URL and press Enter..."
-                    />
-                </div>
-                <div class="input-group">
-                    <button id="base64Btn">Load from Base64</button>
-                    <input
-                        type="text"
-                        id="base64Input"
-                        placeholder="Paste base64 string and press Enter..."
-                    />
-                </div>
+<body>
+    <div id="portrait-warning">
+        <div>📱 Please rotate your device</div>
+        <div style="font-size: 16px">Hold your mobile sideways to play</div>
+    </div>
+    <div id="container">
+        <div id="controls">
+            <button id="genBtn" onclick="location.href='gen.html'">
+                🎨 Generate Maze
+            </button>
+            <input type="file" id="upload" accept="image/*,.maze" />
+            <div class="input-group">
+                <button id="urlBtn">Load from URL</button>
+                <input type="text" id="urlInput" placeholder="Enter image URL and press Enter..." />
             </div>
-            <canvas id="canvas" width="800" height="600"></canvas>
-            <div id="info">
-                Load a maze image to start. Use WASD or Arrow keys to move,
-                Mouse to look around.
+        </div>
+        <canvas id="canvas" width="800" height="600"></canvas>
+        <div id="info">
+            Load a maze image to start. Use WASD or Arrow keys to move,
+            Mouse to look around.
+        </div>
+    </div>
+
+    <div id="winModal">
+        <div class="win-text">🎉 YOU WON! 🎉</div>
+        <div class="win-subtext">Congratulations! You found the goal!</div>
+        <button id="goBackBtn" onclick="goBack()">Go Back</button>
+    </div>
+
+    <div class="joystick_container">
+        <div class="left_joystick_hitbox">
+            <div class="left_joystick">
+                <div class="left_joystick_pointer"></div>
             </div>
         </div>
 
-        <div class="joystick_container">
-            <div class="left_joystick_hitbox">
-                <div class="left_joystick">
-                    <div class="left_joystick_pointer"></div>
-                </div>
-            </div>
-
-            <div class="right_joystick_hitbox">
-                <div class="right_joystick">
-                    <div class="right_joystick_pointer"></div>
-                </div>
+        <div class="right_joystick_hitbox">
+            <div class="right_joystick">
+                <div class="right_joystick_pointer"></div>
             </div>
         </div>
+    </div>
 
-        <script src="./scripts/main.js"></script>
-        <script>
-            if ("serviceWorker" in navigator) {
-                navigator.serviceWorker.register("sw.js");
-            }
-        </script>
-    </body>
+    <script src="./scripts/main.js"></script>
+    <script>
+        if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("sw.js");
+        }
+    </script>
+</body>
+
 </html>

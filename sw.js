@@ -1,4 +1,4 @@
-const CACHE_NAME = "mazegen-v1";
+const CACHE_NAME = "mazegen-v3";
 
 const FILES_TO_CACHE = [
   "index.html",
