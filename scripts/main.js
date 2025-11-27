@@ -584,3 +584,125 @@ document.addEventListener('visibilitychange', () => {
         running = false;
     }
 });
+
+// ---- JOYSTICK VIRTUAL KEY PRESS HELPER ----
+function setKey(key, state) {
+    keys[key] = state;
+    keys[key.toLowerCase()] = state;   // Your system uses both
+}
+
+const joysticks = {
+    left: {
+        hitbox: document.querySelector(".left_joystick_hitbox"),
+        base: document.querySelector(".left_joystick"),
+        pointer: document.querySelector(".left_joystick_pointer"),
+        active: false,
+        startX: 0,
+        startY: 0,
+        id: null
+    },
+    right: {
+        hitbox: document.querySelector(".right_joystick_hitbox"),
+        base: document.querySelector(".right_joystick"),
+        pointer: document.querySelector(".right_joystick_pointer"),
+        active: false,
+        startX: 0,
+        startY: 0,
+        id: null
+    }
+};
+
+function startJoystick(j, e) {
+    const t = e.changedTouches[0];
+    j.id = t.identifier;
+
+    j.startX = t.pageX;
+    j.startY = t.pageY;
+
+    j.base.style.display = "block";
+    j.base.style.left = j.startX + "px";
+    j.base.style.top = j.startY + "px";
+
+    j.pointer.style.left = "50%";
+    j.pointer.style.top = "50%";
+
+    j.active = true;
+}
+
+function updateJoystick(j, e) {
+    if (!j.active) return;
+
+    const t = [...e.changedTouches].find(x => x.identifier === j.id);
+    if (!t) return;
+
+    const dx = t.pageX - j.startX;
+    const dy = t.pageY - j.startY;
+
+    const radius = 70;
+    const dist = Math.min(Math.hypot(dx, dy), radius);
+
+    const angle = Math.atan2(dy, dx);
+
+    const px = Math.cos(angle) * dist;
+    const py = Math.sin(angle) * dist;
+
+    j.pointer.style.left = 70 + px + "px";
+    j.pointer.style.top = 70 + py + "px";
+
+    const dead = 20;
+
+    // --- left joystick → WSAD ---
+    if (j === joysticks.left) {
+        setKey("w", py < -dead);
+        setKey("s", py >  dead);
+        setKey("a", px < -dead);
+        setKey("d", px >  dead);
+    }
+
+    // --- right joystick → Arrow keys ---
+    if (j === joysticks.right) {
+        setKey("ArrowUp",    py < -dead);
+        setKey("ArrowDown",  py >  dead);
+        setKey("ArrowLeft",  px < -dead);
+        setKey("ArrowRight", px >  dead);
+    }
+}
+
+function endJoystick(j, e) {
+    const t = [...e.changedTouches].find(x => x.identifier === j.id);
+    if (!t) return;
+
+    j.active = false;
+    j.id = null;
+    j.base.style.display = "none";
+
+    // Clear all keys for that joystick
+    if (j === joysticks.left) {
+        setKey("w", false);
+        setKey("a", false);
+        setKey("s", false);
+        setKey("d", false);
+    }
+
+    if (j === joysticks.right) {
+        setKey("ArrowUp", false);
+        setKey("ArrowDown", false);
+        setKey("ArrowLeft", false);
+        setKey("ArrowRight", false);
+    }
+}
+
+// ---- EVENTS ----
+Object.values(joysticks).forEach(j => {
+    j.hitbox.addEventListener("touchstart", e => startJoystick(j, e));
+});
+
+window.addEventListener("touchmove", e => {
+    updateJoystick(joysticks.left, e);
+    updateJoystick(joysticks.right, e);
+}, { passive: false });
+
+window.addEventListener("touchend", e => {
+    endJoystick(joysticks.left, e);
+    endJoystick(joysticks.right, e);
+});
