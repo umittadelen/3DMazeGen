@@ -938,3 +938,24 @@ const isTouchDevice = () => {
 if (!isTouchDevice()) {
     document.querySelector('.joystick_container').style.display = 'none';
 }
+
+// ---- AUTO-UPDATE SERVICE WORKER ----
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(registration => {
+        // Check for updates immediately on page load
+        registration.update();
+        
+        // Listen for service worker updates
+        registration.addEventListener('updatefound', () => {
+            const newWorker = registration.installing;
+            newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                    // New service worker ready, show update message
+                    console.log('New version available! Updating...');
+                    // Automatically refresh the page
+                    window.location.reload();
+                }
+            });
+        });
+    });
+}
