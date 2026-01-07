@@ -267,14 +267,31 @@ function loadMazeFormat(arrayBuffer) {
     }
 
     // Validate buffer size
-    if (arrayBuffer.byteLength < 4) {
+    if (arrayBuffer.byteLength < 3) {
         showError('.maze file is corrupted (too small)');
         return;
     }
 
     const view = new DataView(arrayBuffer);
-    mazeWidth = view.getUint16(0, true);
-    mazeHeight = view.getUint16(2, true);
+    const bytesPerDim = view.getUint8(0);
+    
+    // Validate bytesPerDim
+    if (bytesPerDim < 1 || bytesPerDim > 4) {
+        showError('.maze file has invalid header');
+        return;
+    }
+    
+    // Read width (little-endian, variable bytes)
+    mazeWidth = 0;
+    for (let i = 0; i < bytesPerDim; i++) {
+        mazeWidth |= view.getUint8(1 + i) << (i * 8);
+    }
+    
+    // Read height (little-endian, variable bytes)
+    mazeHeight = 0;
+    for (let i = 0; i < bytesPerDim; i++) {
+        mazeHeight |= view.getUint8(1 + bytesPerDim + i) << (i * 8);
+    }
     
     // Validate dimensions
     if (mazeWidth < 3 || mazeHeight < 3 || mazeWidth > 50000 || mazeHeight > 50000) {
@@ -282,13 +299,14 @@ function loadMazeFormat(arrayBuffer) {
         return;
     }
     
-    const expectedSize = 4 + Math.ceil(mazeWidth * mazeHeight * 2 / 8);
+    const headerSize = 1 + bytesPerDim * 2;
+    const expectedSize = headerSize + Math.ceil(mazeWidth * mazeHeight * 2 / 8);
     if (arrayBuffer.byteLength < expectedSize) {
         showError('.maze file is truncated or corrupted');
         return;
     }
     
-    const data = new Uint8Array(arrayBuffer, 4);
+    const data = new Uint8Array(arrayBuffer, headerSize);
     
     maze = new Uint8Array(mazeWidth * mazeHeight);
     

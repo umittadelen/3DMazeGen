@@ -3,6 +3,7 @@ const ctx = canvas.getContext('2d', { willReadFrequently: false });
 const generateBtn = document.getElementById('generateBtn');
 const downloadPngBtn = document.getElementById('downloadPngBtn');
 const downloadMazeBtn = document.getElementById('downloadMazeBtn');
+const findMaxSizeBtn = document.getElementById('findMaxSizeBtn');
 const progressContainer = document.getElementById('progressContainer');
 const progressFill = document.getElementById('progressFill');
 const statusText = document.getElementById('statusText');
@@ -560,6 +561,63 @@ function renderMaze(maze, width, height) {
     ctx.putImageData(imageData, 0, 0);
 }
 
+// Test system capacity with smart exponential search then binary refinement
+function findMaxSystemSize() {
+    console.log('🔍 Starting system capacity detection...');
+    let maxWorking = 101;  // Start with odd number
+    let minFailing = null;
+    const increments = [500, 250, 100, 50, 25, 10, 1];
+    let incrementIndex = 0;
+    
+    // Phase 1: Smart exponential search with custom increments (always testing odd sizes)
+    console.log('Phase 1: Finding working and failing bounds...');
+    while (incrementIndex < increments.length) {
+        const increment = increments[incrementIndex];
+        let testSize = maxWorking + increment;
+        if (testSize % 2 === 0) testSize++;  // Ensure odd
+        const cellsNeeded = testSize * testSize;
+        
+        try {
+            new Uint8Array(cellsNeeded);
+            maxWorking = testSize;
+            console.log(`✓ ${testSize}×${testSize} works (${cellsNeeded.toLocaleString()} cells)`);
+        } catch (e) {
+            minFailing = testSize;
+            console.log(`✗ ${testSize}×${testSize} failed (${cellsNeeded.toLocaleString()} cells)`);
+            incrementIndex++;
+        }
+    }
+    
+    // Phase 2: Binary search between working and failing for precision (always odd)
+    if (minFailing !== null) {
+        console.log(`\nPhase 2: Binary search between ${maxWorking}×${maxWorking} and ${minFailing}×${minFailing}...`);
+        let low = maxWorking;
+        let high = minFailing;
+        
+        while (high - low > 2) {
+            let mid = Math.floor((low + high) / 2);
+            if (mid % 2 === 0) mid++;  // Ensure odd
+            const cellsNeeded = mid * mid;
+            
+            try {
+                new Uint8Array(cellsNeeded);
+                maxWorking = mid;
+                low = mid;
+                console.log(`✓ ${mid}×${mid} works`);
+            } catch (e) {
+                minFailing = mid;
+                high = mid;
+                console.log(`✗ ${mid}×${mid} failed`);
+            }
+        }
+    }
+    
+    console.log(`\n✅ RESULT: Maximum recommended maze size is ${maxWorking}×${maxWorking}`);
+    console.log(`   (${(maxWorking * maxWorking).toLocaleString()} total cells)`);
+    console.log(`   Next failure would be at: ${minFailing}×${minFailing}`);
+    return maxWorking;
+}
+
 generateBtn.addEventListener('click', async () => {
     const startTime = performance.now();
     generateBtn.disabled = true;
@@ -571,6 +629,17 @@ generateBtn.addEventListener('click', async () => {
     let width = parseInt(document.getElementById('width').value);
     let height = parseInt(document.getElementById('height').value);
 
+    // Input validation
+    if (isNaN(width) || isNaN(height) || width < 3 || height < 3) {
+        alert('Width and height must be numbers greater than or equal to 3');
+        generateBtn.disabled = false;
+        downloadPngBtn.disabled = false;
+        downloadMazeBtn.disabled = false;
+        progressContainer.style.display = 'none';
+        return;
+    }
+
+    // Make dimensions odd first
     if (width % 2 === 0) width++;
     if (height % 2 === 0) height++;
 
@@ -579,7 +648,17 @@ generateBtn.addEventListener('click', async () => {
     mazeHeight = height;
 
     updateProgress(0, 100, 'Initializing maze...');
-    maze = new Uint8Array(width * height).fill(B);
+    
+    try {
+        maze = new Uint8Array(width * height).fill(B);
+    } catch (error) {
+        alert(`Insufficient memory to allocate ${width.toLocaleString()}x${height.toLocaleString()} maze. Try a smaller size.`);
+        generateBtn.disabled = false;
+        downloadPngBtn.disabled = false;
+        downloadMazeBtn.disabled = false;
+        progressContainer.style.display = 'none';
+        return;
+    }
 
     const algorithm = algoSelect.value;
     let startX = 1 + Math.floor(Math.random() * Math.floor(width / 2)) * 2;
@@ -642,10 +721,26 @@ generateBtn.addEventListener('click', async () => {
 
     updateProgress(100, 100, 'Rendering maze...');
     await new Promise(resolve => setTimeout(resolve, 0));
-    renderMaze(maze, width, height);
-
-    // Check solvability
-    const { solvable, pathLength } = checkSolvability(maze, [startX, startY], [goalX, goalY], width, height);
+    
+    // Check if maze is too large to display on canvas
+    const canvasLimit = 10000;  // More conservative limit
+    if (width > canvasLimit || height > canvasLimit) {
+        // Canvas too large - show message
+        canvas.width = 800;
+        canvas.height = 200;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#222';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#0f0';
+        ctx.font = 'bold 24px monospace';
+        ctx.fillText(`Generated: ${width}×${height}`, 20, 60);
+        ctx.font = '16px monospace';
+        ctx.fillText(`(Too large to display on screen)`, 20, 90);
+        ctx.fillStyle = '#0a0';
+        ctx.fillText(`✓ Use "Download PNG" or "Download .maze" to save`, 20, 140);
+    } else {
+        renderMaze(maze, width, height);
+    }
 
     const endTime = performance.now();
     const genTime = ((endTime - startTime) / 1000).toFixed(2);
@@ -655,6 +750,8 @@ generateBtn.addEventListener('click', async () => {
     document.getElementById('algoName').textContent = algoSelect.options[algoSelect.selectedIndex].text;
     document.getElementById('genTime').textContent = `${genTime}s`;
 
+    const { solvable, pathLength } = checkSolvability(maze, [startX, startY], [goalX, goalY], width, height);
+    
     const solvableSpan = document.getElementById('solvable');
     if (solvable) {
         solvableSpan.textContent = '✓ Yes';
@@ -682,11 +779,81 @@ downloadPngBtn.addEventListener('click', () => {
     const algorithm = algoSelect.value;
     const filename = `${algorithm}-${mazeWidth}-${mazeHeight}.png`;
     
-    const link = document.createElement('a');
-    link.download = filename;
-    link.href = canvas.toDataURL();
-    link.click();
+    try {
+        // For very large mazes, use direct PNG generation instead of canvas
+        if (mazeWidth > 8000 || mazeHeight > 8000) {
+            downloadPngDirect(maze, mazeWidth, mazeHeight, filename);
+        } else {
+            // For smaller mazes, use canvas
+            canvas.toBlob((blob) => {
+                if (!blob) {
+                    alert('Failed to generate PNG. Try a smaller size.');
+                    return;
+                }
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                link.click();
+                URL.revokeObjectURL(url);
+            }, 'image/png');
+        }
+    } catch (error) {
+        alert('Error downloading PNG: ' + error.message);
+    }
 });
+
+// Generate PNG directly from maze data for large mazes (no canvas)
+function downloadPngDirect(maze, width, height, filename) {
+    try {
+        // Simple PNG header and data generation
+        const cellColors = {
+            0: [0, 0, 0],           // wall = black
+            1: [255, 255, 255],     // path = white
+            2: [255, 0, 0],         // start = red
+            3: [0, 255, 0]          // goal = green
+        };
+
+        // Create image data (RGBA)
+        const pixelData = new Uint8Array(width * height * 4);
+        let pixelIndex = 0;
+        
+        for (let i = 0; i < maze.length; i++) {
+            const cell = maze[i];
+            const color = cellColors[cell] || [0, 0, 0];
+            pixelData[pixelIndex++] = color[0];  // R
+            pixelData[pixelIndex++] = color[1];  // G
+            pixelData[pixelIndex++] = color[2];  // B
+            pixelData[pixelIndex++] = 255;       // A
+        }
+
+        // Create canvas off-screen for PNG conversion
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = width;
+        offCanvas.height = height;
+        const ctx = offCanvas.getContext('2d');
+        
+        const imgData = ctx.createImageData(width, height);
+        imgData.data.set(pixelData);
+        ctx.putImageData(imgData, 0, 0);
+
+        // Convert to blob and download
+        offCanvas.toBlob((blob) => {
+            if (!blob) {
+                alert('Failed to generate PNG');
+                return;
+            }
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            link.click();
+            URL.revokeObjectURL(url);
+        }, 'image/png');
+    } catch (error) {
+        alert('Error creating PNG: ' + error.message);
+    }
+}
 
 downloadMazeBtn.addEventListener('click', () => {
     if (!maze) {
@@ -696,19 +863,49 @@ downloadMazeBtn.addEventListener('click', () => {
     const algorithm = algoSelect.value;
     const filename = `${algorithm}-${mazeWidth}-${mazeHeight}.maze`;
     
-    const link = document.createElement('a');
-    link.download = filename;
-    link.href = createMazeFormat(maze, mazeWidth, mazeHeight);
-    link.click();
+    try {
+        const link = document.createElement('a');
+        link.download = filename;
+        link.href = createMazeFormat(maze, mazeWidth, mazeHeight);
+        link.click();
+    } catch (error) {
+        alert('Error creating .maze file: ' + error.message);
+        console.error('Maze format error:', error);
+    }
+});
+
+findMaxSizeBtn.addEventListener('click', () => {
+    const maxSize = findMaxSystemSize();
+    const width = document.getElementById('width');
+    const height = document.getElementById('height');
+    
+    // findMaxSystemSize() already ensures odd numbers
+    width.value = maxSize;
+    height.value = maxSize;
+    
+    alert(`Max system size detected: ${maxSize}×${maxSize}`);
 });
 
 // ---- .MAZE FORMAT FUNCTIONS ----
 function createMazeFormat(cells, width, height) {
-    // Create header
-    const header = new Uint8Array(4);
-    const view = new DataView(header.buffer);
-    view.setUint16(0, width, true);
-    view.setUint16(2, height, true);
+    // Determine bytes needed for dimensions using math
+    const maxDim = Math.max(width, height);
+    const bytesPerDim = Math.max(1, Math.ceil(maxDim.toString(16).length / 2));
+    
+    // Create header: [bytesPerDim][width bytes][height bytes]
+    const headerSize = 1 + bytesPerDim * 2;
+    const header = new Uint8Array(headerSize);
+    header[0] = bytesPerDim;
+    
+    // Write width (little-endian)
+    for (let i = 0; i < bytesPerDim; i++) {
+        header[1 + i] = (width >> (i * 8)) & 0xFF;
+    }
+    
+    // Write height (little-endian)
+    for (let i = 0; i < bytesPerDim; i++) {
+        header[1 + bytesPerDim + i] = (height >> (i * 8)) & 0xFF;
+    }
 
     // Pack cells (2 bits per cell) into bytes
     const dataBytes = Math.ceil(width * height * 2 / 8);
@@ -724,61 +921,11 @@ function createMazeFormat(cells, width, height) {
     }
 
     // Combine header and data
-    const result = new Uint8Array(4 + dataBytes);
+    const result = new Uint8Array(headerSize + dataBytes);
     result.set(header, 0);
-    result.set(dataArr, 4);
+    result.set(dataArr, headerSize);
 
     // Convert to blob URL for download
     const blob = new Blob([result], { type: 'application/octet-stream' });
     return URL.createObjectURL(blob);
-}
-
-function mazeToPNG(arrayBuffer, scale = 1) {
-    const view = new DataView(arrayBuffer);
-    const width = view.getUint16(0, true);
-    const height = view.getUint16(2, true);
-    const data = new Uint8Array(arrayBuffer, 4);
-    const totalCells = width * height;
-
-    const cellColors = [
-        [0, 0, 0],           // wall = black
-        [255, 255, 255],     // path = white
-        [255, 0, 0],         // start = red
-        [0, 255, 0]          // goal = green
-    ];
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width * scale;
-    canvas.height = height * scale;
-    const ctx = canvas.getContext('2d');
-    const imgData = ctx.createImageData(width, height);
-    
-    let bitIndex = 0;
-    for (let i = 0; i < totalCells; i++) {
-        const byteIndex = bitIndex >> 3;
-        const offset = 6 - (bitIndex % 8);
-        const cell = (data[byteIndex] >> offset) & 0b11;
-        bitIndex += 2;
-
-        const [r, g, b] = cellColors[cell];
-        const px = i * 4;
-        imgData.data[px] = r;
-        imgData.data[px + 1] = g;
-        imgData.data[px + 2] = b;
-        imgData.data[px + 3] = 255;
-    }
-
-    ctx.putImageData(imgData, 0, 0);
-
-    if (scale > 1) {
-        const scaledCanvas = document.createElement('canvas');
-        scaledCanvas.width = width * scale;
-        scaledCanvas.height = height * scale;
-        const sctx = scaledCanvas.getContext('2d');
-        sctx.imageSmoothingEnabled = false;
-        sctx.drawImage(canvas, 0, 0, width * scale, height * scale);
-        return scaledCanvas.toDataURL("image/png");
-    }
-
-    return canvas.toDataURL("image/png");
 }
