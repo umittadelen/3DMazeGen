@@ -6,6 +6,8 @@ const info = document.getElementById('info');
 const upload = document.getElementById('upload');
 const urlBtn = document.getElementById('urlBtn');
 const urlInput = document.getElementById('urlInput');
+let viewWidth = window.innerWidth;
+let viewHeight = window.innerHeight;
 
 // ---- ORIENTATION LOCK ----
 function checkOrientation() {
@@ -57,26 +59,323 @@ let won = false;
 let running = false;
 let minimapVisible = false;
 let gameLoopId = null;
+let needsRender = true;
 
 let playerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
 
 let FOV = Math.PI / 3;
-const NUM_RAYS = 500;
+let NUM_RAYS = 1024;
 const MAX_DEPTH = 20;
+const FOG_COLOR = { r: 12, g: 25, b: 45 };
+const FOG_DISTANCE_FACTOR = 0.3;
+const SKY_COLOR = { r: 26, g: 26, b: 46 };  // #1a1a2e
+const GROUND_COLOR = { r: 15, g: 52, b: 96 }; // #0f3460
 const MOVE_SPEED = 0.025;
 const ROT_SPEED = 0.025;
+const BASE_FRAME_SECONDS = 1 / 60;
+const MAX_DELTA_SECONDS = 0.1;
 
 const keys = {};
 let mouseLocked = false;
 let ignoreMouseMovement = false;
 let pointerLockPending = false;  // Flag to prevent simultaneous lock/unlock requests
+let lastFrameTimestamp = null;
+
+let mazeWorker = null;
+let mazeWorkerRequestId = 0;
+const mazeWorkerPending = new Map();
+
+function initMazeWorker() {
+    if (typeof Worker === 'undefined') return;
+    try {
+        mazeWorker = new Worker('scripts/mazeWorker.js');
+
+        mazeWorker.addEventListener('message', (event) => {
+            const { id, ok, result, error } = event.data || {};
+            const pending = mazeWorkerPending.get(id);
+            if (!pending) return;
+
+            mazeWorkerPending.delete(id);
+            clearTimeout(pending.timeoutId);
+
+            if (ok) {
+                pending.resolve(result);
+            } else {
+                pending.reject(new Error(error || 'Maze worker failed to parse file'));
+            }
+        });
+
+        mazeWorker.addEventListener('error', (event) => {
+            const err = new Error(event.message || 'Maze worker crashed');
+            mazeWorkerPending.forEach((pending) => {
+                clearTimeout(pending.timeoutId);
+                pending.reject(err);
+            });
+            mazeWorkerPending.clear();
+            mazeWorker = null;
+        });
+    } catch (err) {
+        console.warn('Maze worker disabled:', err);
+        mazeWorker = null;
+    }
+}
+
+function parseMazeFormatSync(arrayBuffer) {
+    if (!arrayBuffer || arrayBuffer.byteLength < 3) {
+        throw new Error('.maze file is corrupted (too small)');
+    }
+
+    const view = new DataView(arrayBuffer);
+    const bytesPerDim = view.getUint8(0);
+    if (bytesPerDim < 1 || bytesPerDim > 4) {
+        throw new Error('.maze file has invalid header');
+    }
+
+    let width = 0;
+    for (let i = 0; i < bytesPerDim; i++) {
+        width |= view.getUint8(1 + i) << (i * 8);
+    }
+
+    let height = 0;
+    for (let i = 0; i < bytesPerDim; i++) {
+        height |= view.getUint8(1 + bytesPerDim + i) << (i * 8);
+    }
+
+    if (width < 3 || height < 3 || width > 50000 || height > 50000) {
+        throw new Error('.maze file has invalid dimensions: ' + width + 'x' + height);
+    }
+
+    const totalCells = width * height;
+    if (!Number.isFinite(totalCells) || totalCells <= 0) {
+        throw new Error('.maze file dimensions overflowed');
+    }
+
+    const headerSize = 1 + bytesPerDim * 2;
+    const expectedSize = headerSize + Math.ceil(totalCells * 2 / 8);
+    if (arrayBuffer.byteLength < expectedSize) {
+        throw new Error('.maze file is truncated or corrupted');
+    }
+
+    const data = new Uint8Array(arrayBuffer, headerSize);
+    const cells = new Uint8Array(totalCells);
+
+    let startIndex = -1;
+    let goalIndex = -1;
+    let bitIndex = 0;
+
+    for (let i = 0; i < totalCells; i++) {
+        const byteIndex = bitIndex >> 3;
+        if (byteIndex >= data.length) {
+            throw new Error('.maze file data is corrupted');
+        }
+
+        const offset = 6 - (bitIndex % 8);
+        const cell = (data[byteIndex] >> offset) & 0b11;
+        bitIndex += 2;
+
+        cells[i] = cell;
+        if (cell === 2 && startIndex === -1) startIndex = i;
+        if (cell === 3 && goalIndex === -1) goalIndex = i;
+    }
+
+    if (startIndex === -1 || goalIndex === -1) {
+        throw new Error('Invalid .maze file: missing start or goal');
+    }
+
+    return { width, height, cells, startIndex, goalIndex };
+}
+
+function parseMazeFormatWithWorker(arrayBuffer) {
+    if (!mazeWorker) {
+        return Promise.resolve(parseMazeFormatSync(arrayBuffer));
+    }
+
+    return new Promise((resolve, reject) => {
+        const id = ++mazeWorkerRequestId;
+        const timeoutId = setTimeout(() => {
+            mazeWorkerPending.delete(id);
+            reject(new Error('.maze file parse timed out'));
+        }, 10000);
+
+        mazeWorkerPending.set(id, { resolve, reject, timeoutId });
+
+        try {
+            mazeWorker.postMessage({
+                id,
+                type: 'parseMazeFormat',
+                arrayBuffer
+            }, [arrayBuffer]);
+        } catch (err) {
+            clearTimeout(timeoutId);
+            mazeWorkerPending.delete(id);
+            reject(err);
+        }
+    });
+}
+
+initMazeWorker();
+
+const wallTextures = [];
+let wallTexturesReady = false;
+const textureNames = ['bricks.png', 'bricks1.png', 'bricks2.png'];
+const WALL_TEXTURE_REPEAT = 7; // Set to 4 for 4x4 tiling
+const MAX_WALL_ATLAS_CACHE = 512;
+let pendingTextureLoads = textureNames.length;
+let mazeTextureSeed = 2166136261 >>> 0;
+const wallTextureAtlasCache = new Map();
+
+function clearWallTextureAtlasCache() {
+    wallTextureAtlasCache.clear();
+}
+
+function createRandomizedCellAtlas(cellX, cellY) {
+    if (wallTextures.length === 0) return null;
+
+    const base = wallTextures[0];
+    const tileWidth = base.width;
+    const tileHeight = base.height;
+
+    const atlas = document.createElement('canvas');
+    atlas.width = tileWidth * WALL_TEXTURE_REPEAT;
+    atlas.height = tileHeight * WALL_TEXTURE_REPEAT;
+    const atlasCtx = atlas.getContext('2d');
+    atlasCtx.imageSmoothingEnabled = false;
+
+    for (let ty = 0; ty < WALL_TEXTURE_REPEAT; ty++) {
+        for (let tx = 0; tx < WALL_TEXTURE_REPEAT; tx++) {
+            const subtileHash = hashCoord(
+                mazeTextureSeed ^ 0x9e3779b9,
+                cellX * WALL_TEXTURE_REPEAT + tx,
+                cellY * WALL_TEXTURE_REPEAT + ty
+            );
+            const src = wallTextures[subtileHash % wallTextures.length];
+            atlasCtx.drawImage(
+                src,
+                0,
+                0,
+                src.width,
+                src.height,
+                tx * tileWidth,
+                ty * tileHeight,
+                tileWidth,
+                tileHeight
+            );
+        }
+    }
+
+    return atlas;
+}
+
+textureNames.forEach((name) => {
+    const texture = new Image();
+
+    texture.addEventListener('load', () => {
+        wallTextures.push(texture);
+        pendingTextureLoads -= 1;
+        if (pendingTextureLoads === 0) {
+            wallTexturesReady = true;
+            needsRender = true;
+        }
+    });
+
+    texture.addEventListener('error', () => {
+        console.warn(`Optional wall texture not found: resources/${name}`);
+        pendingTextureLoads -= 1;
+        if (pendingTextureLoads === 0) {
+            wallTexturesReady = wallTextures.length > 0;
+            needsRender = true;
+        }
+    });
+
+    texture.src = `resources/${name}`;
+});
+
+function fnv1aHash(bytes) {
+    let hash = 2166136261 >>> 0;
+    for (let i = 0; i < bytes.length; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash >>> 0;
+}
+
+function computeMazeLayoutSeed(width, height, cells) {
+    // Hash normalized maze data so identical maze layouts produce identical textures across devices.
+    const header = new Uint8Array(8);
+    header[0] = width & 0xff;
+    header[1] = (width >>> 8) & 0xff;
+    header[2] = (width >>> 16) & 0xff;
+    header[3] = (width >>> 24) & 0xff;
+    header[4] = height & 0xff;
+    header[5] = (height >>> 8) & 0xff;
+    header[6] = (height >>> 16) & 0xff;
+    header[7] = (height >>> 24) & 0xff;
+
+    let hash = fnv1aHash(header);
+    for (let i = 0; i < cells.length; i++) {
+        hash ^= cells[i];
+        hash = Math.imul(hash, 16777619) >>> 0;
+    }
+
+    return hash >>> 0;
+}
+
+function hashCoord(seed, x, y) {
+    let h = (seed ^ Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263)) >>> 0;
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, 1274126177) >>> 0;
+    return (h ^ (h >>> 16)) >>> 0;
+}
+
+function getTextureForCell(cellX, cellY) {
+    if (!wallTexturesReady || wallTextures.length === 0) return null;
+    const key = cellY * mazeWidth + cellX;
+    const cached = wallTextureAtlasCache.get(key);
+    if (cached) {
+        return cached;
+    }
+
+    const atlas = createRandomizedCellAtlas(cellX, cellY);
+    if (!atlas) return null;
+
+    wallTextureAtlasCache.set(key, atlas);
+
+    // Keep memory and GC pressure bounded.
+    if (wallTextureAtlasCache.size > MAX_WALL_ATLAS_CACHE) {
+        const firstKey = wallTextureAtlasCache.keys().next().value;
+        wallTextureAtlasCache.delete(firstKey);
+    }
+
+    return atlas;
+}
+
+function updateRayCount(cssWidth) {
+    // One ray per CSS pixel keeps wall strips exactly 1 screen pixel wide.
+    NUM_RAYS = Math.max(1, Math.floor(cssWidth));
+}
 
 function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = window.innerWidth;
+    const cssHeight = window.innerHeight;
+
+    updateRayCount(cssWidth);
+
+    viewWidth = Math.floor(cssWidth * dpr);
+    viewHeight = Math.floor(cssHeight * dpr);
+
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+    canvas.width = viewWidth;
+    canvas.height = viewHeight;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
     minimap.width = MINIMAP_SIZE;
     minimap.height = MINIMAP_SIZE;
+    ctx.imageSmoothingEnabled = false;
+    minimapCtx.imageSmoothingEnabled = false;
+    needsRender = true;
 }
 
 window.addEventListener('resize', resizeCanvas);
@@ -103,7 +402,7 @@ upload.addEventListener('change', (e) => {
     if (file.name.endsWith('.maze')) {
         // Load .maze format
         const reader = new FileReader();
-        reader.onload = (event) => {
+        reader.onload = async (event) => {
             try {
                 const arrayBuffer = event.target.result;
                 
@@ -113,8 +412,8 @@ upload.addEventListener('change', (e) => {
                     return;
                 }
                 
-                loadMazeFormat(arrayBuffer);
-                hideControls();
+                const loaded = await loadMazeFormat(arrayBuffer);
+                if (loaded) hideControls();
             } catch (err) {
                 console.error('Maze load error:', err);
                 showError('Failed to load .maze file: ' + err.message);
@@ -205,6 +504,7 @@ function loadMaze(img) {
         cancelAnimationFrame(gameLoopId);
         gameLoopId = null;
     }
+    lastFrameTimestamp = null;
 
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = img.width;
@@ -251,105 +551,52 @@ function loadMaze(img) {
         return;
     }
 
+    mazeTextureSeed = computeMazeLayoutSeed(mazeWidth, mazeHeight, maze);
+    clearWallTextureAtlasCache();
+
     won = false;
-    playerAngle = 0;
+    playerAngle = getInitialPlayerAngle();
     playerPitch = 0;
     needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
     gameLoopId = requestAnimationFrame(gameLoop);
 }
 
-function loadMazeFormat(arrayBuffer) {
+async function loadMazeFormat(arrayBuffer) {
     // Stop previous game loop
     if (gameLoopId) {
         cancelAnimationFrame(gameLoopId);
         gameLoopId = null;
     }
+    lastFrameTimestamp = null;
 
-    // Validate buffer size
-    if (arrayBuffer.byteLength < 3) {
-        showError('.maze file is corrupted (too small)');
-        return;
+    let parsed;
+    try {
+        parsed = await parseMazeFormatWithWorker(arrayBuffer);
+    } catch (err) {
+        showError(err.message || 'Failed to parse .maze file');
+        return false;
     }
 
-    const view = new DataView(arrayBuffer);
-    const bytesPerDim = view.getUint8(0);
-    
-    // Validate bytesPerDim
-    if (bytesPerDim < 1 || bytesPerDim > 4) {
-        showError('.maze file has invalid header');
-        return;
-    }
-    
-    // Read width (little-endian, variable bytes)
-    mazeWidth = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        mazeWidth |= view.getUint8(1 + i) << (i * 8);
-    }
-    
-    // Read height (little-endian, variable bytes)
-    mazeHeight = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        mazeHeight |= view.getUint8(1 + bytesPerDim + i) << (i * 8);
-    }
-    
-    // Validate dimensions
-    if (mazeWidth < 3 || mazeHeight < 3 || mazeWidth > 50000 || mazeHeight > 50000) {
-        showError('.maze file has invalid dimensions: ' + mazeWidth + 'x' + mazeHeight);
-        return;
-    }
-    
-    const headerSize = 1 + bytesPerDim * 2;
-    const expectedSize = headerSize + Math.ceil(mazeWidth * mazeHeight * 2 / 8);
-    if (arrayBuffer.byteLength < expectedSize) {
-        showError('.maze file is truncated or corrupted');
-        return;
-    }
-    
-    const data = new Uint8Array(arrayBuffer, headerSize);
-    
-    maze = new Uint8Array(mazeWidth * mazeHeight);
-    
-    let foundStart = false;
-    let foundGoal = false;
-    let bitIndex = 0;
-    
-    // Unpack cells from .maze format (2 bits per cell)
-    for (let i = 0; i < mazeWidth * mazeHeight; i++) {
-        const byteIndex = bitIndex >> 3;
-        if (byteIndex >= data.length) {
-            showError('.maze file data is corrupted');
-            return;
-        }
-        
-        const offset = 6 - (bitIndex % 8);
-        const cell = (data[byteIndex] >> offset) & 0b11;
-        bitIndex += 2;
-        
-        maze[i] = cell;
-        
-        if (cell === 2) { // Start (red)
-            playerX = (i % mazeWidth) + 0.5;
-            playerY = Math.floor(i / mazeWidth) + 0.5;
-            foundStart = true;
-        } else if (cell === 3) { // Goal (green)
-            goalX = (i % mazeWidth) + 0.5;
-            goalY = Math.floor(i / mazeWidth) + 0.5;
-            foundGoal = true;
-        }
-    }
-    
-    if (!foundStart || !foundGoal) {
-        showError('Invalid .maze file: missing start or goal');
-        return;
-    }
+    mazeWidth = parsed.width;
+    mazeHeight = parsed.height;
+    maze = parsed.cells;
+
+    playerX = (parsed.startIndex % mazeWidth) + 0.5;
+    playerY = Math.floor(parsed.startIndex / mazeWidth) + 0.5;
+    goalX = (parsed.goalIndex % mazeWidth) + 0.5;
+    goalY = Math.floor(parsed.goalIndex / mazeWidth) + 0.5;
+
+    mazeTextureSeed = computeMazeLayoutSeed(mazeWidth, mazeHeight, maze);
+    clearWallTextureAtlasCache();
     
     won = false;
-    playerAngle = 0;
+    playerAngle = getInitialPlayerAngle();
     playerPitch = 0;
     needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
     gameLoopId = requestAnimationFrame(gameLoop);
+    return true;
 }
 
 function isWall(x, y) {
@@ -357,6 +604,72 @@ function isWall(x, y) {
     const iy = Math.floor(y);
     if (ix < 0 || ix >= mazeWidth || iy < 0 || iy >= mazeHeight) return true;
     return maze[iy * mazeWidth + ix] === 0;
+}
+
+function isWalkableCell(cellX, cellY) {
+    if (cellX < 0 || cellX >= mazeWidth || cellY < 0 || cellY >= mazeHeight) {
+        return false;
+    }
+    return maze[cellY * mazeWidth + cellX] !== 0;
+}
+
+function getCorridorDepth(startCellX, startCellY, dirX, dirY, maxSteps = 6) {
+    let depth = 0;
+    for (let step = 1; step <= maxSteps; step++) {
+        const nextX = startCellX + dirX * step;
+        const nextY = startCellY + dirY * step;
+        if (!isWalkableCell(nextX, nextY)) {
+            break;
+        }
+        depth += 1;
+    }
+    return depth;
+}
+
+function getInitialPlayerAngle() {
+    const startCellX = Math.floor(playerX);
+    const startCellY = Math.floor(playerY);
+    const goalDirX = goalX - playerX;
+    const goalDirY = goalY - playerY;
+    const goalLength = Math.hypot(goalDirX, goalDirY) || 1;
+    const directions = [
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: -1 }
+    ];
+
+    let bestDirection = null;
+    let bestScore = -Infinity;
+
+    for (const direction of directions) {
+        const nextCellX = startCellX + direction.dx;
+        const nextCellY = startCellY + direction.dy;
+        if (!isWalkableCell(nextCellX, nextCellY)) {
+            continue;
+        }
+
+        const corridorDepth = getCorridorDepth(startCellX, startCellY, direction.dx, direction.dy);
+        const goalAlignment = (
+            direction.dx * goalDirX + direction.dy * goalDirY
+        ) / goalLength;
+        const score = corridorDepth * 10 + goalAlignment;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestDirection = direction;
+        }
+    }
+
+    if (bestDirection) {
+        return Math.atan2(bestDirection.dy, bestDirection.dx);
+    }
+
+    if (goalLength > 0) {
+        return Math.atan2(goalDirY, goalDirX);
+    }
+
+    return 0;
 }
 
 function checkGoal() {
@@ -412,6 +725,7 @@ function goBack() {
         cancelAnimationFrame(gameLoopId);
         gameLoopId = null;
     }
+    lastFrameTimestamp = null;
     
     // Reset UI - show controls again
     document.getElementById('controls').style.display = 'flex';
@@ -421,7 +735,7 @@ function goBack() {
     
     // Clear canvas
     ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, viewWidth, viewHeight);
 }
 
 // OPTIMIZED: DDA ray casting algorithm
@@ -458,6 +772,7 @@ function castRay(angle) {
     let dist = 0;
     let hitX = playerX;
     let hitY = playerY;
+    let hitSide = 0;
 
     // DDA algorithm - steps through grid cells
     for (let i = 0; i < MAX_DEPTH * 2; i++) {
@@ -465,10 +780,12 @@ function castRay(angle) {
             sideDistX += deltaDistX;
             mapX += stepX;
             dist = sideDistX - deltaDistX;
+            hitSide = 0;
         } else {
             sideDistY += deltaDistY;
             mapY += stepY;
             dist = sideDistY - deltaDistY;
+            hitSide = 1;
         }
 
         if (mapX < 0 || mapX >= mazeWidth || mapY < 0 || mapY >= mazeHeight) {
@@ -492,54 +809,127 @@ function castRay(angle) {
         }
     }
 
-    return { dist, hitType, hitX, hitY };
+    // Use perpendicular hit distance math to stabilize texture sampling at grazing angles.
+    let perpDist = dist;
+    if (hitSide === 0) {
+        const safeDirX = Math.abs(dirX) < 1e-8 ? (dirX >= 0 ? 1e-8 : -1e-8) : dirX;
+        perpDist = (mapX - playerX + (1 - stepX) / 2) / safeDirX;
+    } else {
+        const safeDirY = Math.abs(dirY) < 1e-8 ? (dirY >= 0 ? 1e-8 : -1e-8) : dirY;
+        perpDist = (mapY - playerY + (1 - stepY) / 2) / safeDirY;
+    }
+
+    if (!Number.isFinite(perpDist) || perpDist <= 0) {
+        perpDist = Math.max(dist, 0.0001);
+    }
+
+    hitX = playerX + dirX * perpDist;
+    hitY = playerY + dirY * perpDist;
+
+    let wallX = hitSide === 0 ? hitY : hitX;
+    wallX -= Math.floor(wallX + 1e-7);
+    if (wallX < 0) wallX += 1;
+    if (wallX >= 1) wallX -= 1;
+
+    return {
+        dist: Math.max(perpDist, 0.0001),
+        hitType,
+        hitX,
+        hitY,
+        hitSide,
+        wallX,
+        hitMapX: mapX,
+        hitMapY: mapY,
+        dirX,
+        dirY
+    };
 }
 
-function render() {
-    const skyColor = { r: 26, g: 26, b: 46 };  // #1a1a2e
-    const groundColor = { r: 15, g: 52, b: 96 }; // #0f3460
+function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
+    if (wallTexturesReady && result.hitType === 0) {
+        const wallTexture = getTextureForCell(result.hitMapX, result.hitMapY);
+        if (wallTexture) {
 
-    const centerY = canvas.height / 2 + playerPitch * canvas.height / 2;
+            const localWallX = result.wallX;
+            let texX = Math.floor(localWallX * wallTexture.width);
+
+            if (result.hitSide === 0 && result.dirX > 0) {
+                texX = wallTexture.width - texX - 1;
+            } else if (result.hitSide === 1 && result.dirY < 0) {
+                texX = wallTexture.width - texX - 1;
+            }
+
+            texX = Math.max(0, Math.min(wallTexture.width - 1, texX));
+
+            ctx.drawImage(
+                wallTexture,
+                texX,
+                0,
+                1,
+                wallTexture.height,
+                x,
+                y,
+                stripWidth,
+                wallHeight
+            );
+
+            if (result.hitSide === 1) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+                ctx.fillRect(x, y, stripWidth, wallHeight);
+            }
+
+            ctx.fillStyle = `rgba(12, 25, 45, ${fog})`;
+            ctx.fillRect(x, y, stripWidth, wallHeight);
+            return;
+        }
+    }
+
+    let r = 200, g = 200, b = 200;
+    if (result.hitType === 3) {
+        r = 0; g = 255; b = 0;
+    } else if (result.hitType === 4) {
+        r = 0; g = 100; b = 255;
+    }
+
+    r = Math.floor(r * (1 - fog) + FOG_COLOR.r * fog);
+    g = Math.floor(g * (1 - fog) + FOG_COLOR.g * fog);
+    b = Math.floor(b * (1 - fog) + FOG_COLOR.b * fog);
+
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(x, y, stripWidth, wallHeight);
+}
+
+function render(collectRayData = false) {
+    const centerY = viewHeight / 2 + playerPitch * viewHeight / 2;
 
     // Sky
-    ctx.fillStyle = `rgb(${skyColor.r}, ${skyColor.g}, ${skyColor.b})`;
-    ctx.fillRect(0, 0, canvas.width, centerY);
+    ctx.fillStyle = `rgb(${SKY_COLOR.r}, ${SKY_COLOR.g}, ${SKY_COLOR.b})`;
+    ctx.fillRect(0, 0, viewWidth, centerY);
 
     // Ground
-    ctx.fillStyle = `rgb(${groundColor.r}, ${groundColor.g}, ${groundColor.b})`;
-    ctx.fillRect(0, centerY, canvas.width, canvas.height - centerY);
+    ctx.fillStyle = `rgb(${GROUND_COLOR.r}, ${GROUND_COLOR.g}, ${GROUND_COLOR.b})`;
+    ctx.fillRect(0, centerY, viewWidth, viewHeight - centerY);
 
     // Cast rays
-    const rayData = [];
+    const rayData = collectRayData ? [] : null;
+    const startAngle = playerAngle - FOV / 2;
+    const angleStep = FOV / NUM_RAYS;
+    const planeDist = (viewWidth / 2) / Math.tan(FOV / 2);
     for (let i = 0; i < NUM_RAYS; i++) {
-        const rayAngle = playerAngle - FOV / 2 + (FOV * i) / NUM_RAYS;
+        const rayAngle = startAngle + angleStep * i;
         const result = castRay(rayAngle);
-        rayData.push(result);
+        if (rayData) rayData.push(result);
 
-        const correctedDist = result.dist * Math.cos(rayAngle - playerAngle);
-        const planeDist = (canvas.width / 2) / Math.tan(FOV / 2);
+        const correctedDist = Math.max(result.dist * Math.cos(rayAngle - playerAngle), 0.0001);
         const wallHeight = planeDist / correctedDist;
 
         // Fog using smoother exponential falloff
-        const fog = 1 - Math.exp(-correctedDist / (MAX_DEPTH * 0.5));
-
-        let r = 200, g = 200, b = 200;
-        if (result.hitType === 3) {
-            r = 0; g = 255; b = 0;
-        } else if (result.hitType === 4) {
-            r = 0; g = 100; b = 255;
-        }
-
-        // Blend toward background color (same as sky/ground midpoint)
-        const fogColor = { r: 12, g: 25, b: 45 }; // blend target
-        r = Math.floor(r * (1 - fog) + fogColor.r * fog);
-        g = Math.floor(g * (1 - fog) + fogColor.g * fog);
-        b = Math.floor(b * (1 - fog) + fogColor.b * fog);
-
-        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-        const x = (i * canvas.width) / NUM_RAYS;
-        const y = centerY - wallHeight / 2;
-        ctx.fillRect(x, y, canvas.width / NUM_RAYS + 1, wallHeight);
+        const fog = 1 - Math.exp(-correctedDist / (MAX_DEPTH * FOG_DISTANCE_FACTOR));
+        const x = Math.floor((i * viewWidth) / NUM_RAYS);
+        const nextX = Math.floor(((i + 1) * viewWidth) / NUM_RAYS);
+        const stripWidth = Math.max(1, nextX - x);
+        const y = Math.round(centerY - wallHeight / 2);
+        renderWallSlice(result, x, y, stripWidth, Math.ceil(wallHeight), fog);
     }
 
     return rayData;
@@ -603,59 +993,22 @@ function renderMinimap(rayData) {
     );
     minimapCtx.stroke();
 
-    // Draw player
     minimapCtx.fillStyle = '#f00';
     minimapCtx.beginPath();
     minimapCtx.arc(centerX, centerY, 3, 0, Math.PI * 2);
     minimapCtx.fill();
 }
 
-function applyIGNDithering(ctx, canvas) {
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-    const w = canvas.width;
-    const h = canvas.height;
-
-    // Controls the look
-    const coherence = 0.02; // spatial coherence (lower = smoother)
-    const amplitude = 0.8;  // strength of dithering
-    const chaos = 0.3;      // white noise twist (0–1)
-
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            const i = (y * w + x) * 4;
-
-            // --- coherent base noise
-            const dot = x * 0.06711056 + y * 0.00583715;
-            let base = 52.9829189 * (dot - Math.floor(dot));
-            base = (base - Math.floor(base)) * 2 - 1; // -1..1
-            const coherent = base * amplitude;
-
-            // --- chaotic flicker
-            const white = (Math.random() * 2 - 1) * amplitude * chaos;
-
-            // combined noise, scaled to avoid visible pixel patterning
-            const n = (coherent + white) * 255 * coherence;
-
-            data[i] = Math.max(0, Math.min(255, data[i] + n));
-            data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + n));
-            data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + n));
-        }
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-}
-
-let needsRender = true;
-
-function update() {
+function update(deltaSeconds = BASE_FRAME_SECONDS) {
     if (won) return;
+
+    const frameScale = Math.max(0, deltaSeconds / BASE_FRAME_SECONDS);
 
     let moveX = 0;
     let moveY = 0;
     let movedOrRotated = false;
 
-    let speed = MOVE_SPEED;
+    let speed = MOVE_SPEED * frameScale;
     if (running) speed *= 2;
 
     if (keys['w'] || keys['arrowup']) {
@@ -682,12 +1035,14 @@ function update() {
         moveY = (moveY / moveMagnitude) * speed;
     }
 
+    const rotationStep = ROT_SPEED * frameScale;
+
     if (keys['ArrowLeft']) {
-        playerAngle -= ROT_SPEED;
+        playerAngle -= rotationStep;
         movedOrRotated = true;
     }
     if (keys['ArrowRight']) {
-        playerAngle += ROT_SPEED;
+        playerAngle += rotationStep;
         movedOrRotated = true;
     }
 
@@ -710,15 +1065,27 @@ function update() {
 
     checkGoal();
 
-    needsRender = movedOrRotated;
+    needsRender = needsRender || movedOrRotated;
 }
 
-function gameLoop() {
-    update();
+function gameLoop(timestamp) {
+    let deltaSeconds = BASE_FRAME_SECONDS;
+
+    if (typeof timestamp === 'number') {
+        if (lastFrameTimestamp !== null) {
+            deltaSeconds = (timestamp - lastFrameTimestamp) / 1000;
+            if (!Number.isFinite(deltaSeconds) || deltaSeconds < 0) {
+                deltaSeconds = BASE_FRAME_SECONDS;
+            }
+            deltaSeconds = Math.min(deltaSeconds, MAX_DELTA_SECONDS);
+        }
+        lastFrameTimestamp = timestamp;
+    }
+
+    update(deltaSeconds);
     if (needsRender) {
-        const rayData = render();
-        applyIGNDithering(ctx, canvas);
-        if (minimapVisible) renderMinimap(rayData);
+        const rayData = render(minimapVisible);
+        if (minimapVisible && rayData) renderMinimap(rayData);
         needsRender = false;
     }
     gameLoopId = requestAnimationFrame(gameLoop);
@@ -733,6 +1100,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'm') {
         minimapVisible = !minimapVisible;
         minimap.style.display = minimapVisible ? 'block' : 'none';
+        needsRender = true;
     }
 });
 
@@ -958,6 +1326,7 @@ if (!isTouchDevice()) {
 }
 
 // ---- AUTO-UPDATE SERVICE WORKER ----
+/*
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then(registration => {
         // Check for updates immediately on page load
@@ -977,3 +1346,4 @@ if ('serviceWorker' in navigator) {
         });
     });
 }
+*/

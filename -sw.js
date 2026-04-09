@@ -5,11 +5,11 @@ const FILES_TO_CACHE = [
   "gen.html",
   "scripts/main.js",
   "scripts/gen.js",
-  "icons/icon-60.png",
-  "icons/icon-76.png",
-  "icons/icon-120.png",
-  "icons/icon-152.png",
-  "icons/icon-180.png"
+  "resources/icons/icon-60.png",
+  "resources/icons/icon-76.png",
+  "resources/icons/icon-120.png",
+  "resources/icons/icon-152.png",
+  "resources/icons/icon-180.png"
 ];
 
 // Install: cache everything
