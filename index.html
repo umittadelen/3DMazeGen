@@ -6,6 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <meta name="screen-orientation" content="landscape" />
     <title>3D Maze Game</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        rel="preload"
+        as="style"
+        href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap"
+        onload="this.onload=null;this.rel='stylesheet'"
+    />
+    <noscript>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" />
+    </noscript>
     <style>
         body {
             margin: 0;
@@ -14,6 +25,14 @@
             overflow: hidden;
             height: 100vh;
             width: 100vw;
+            font-family: 'Quicksand', sans-serif;
+        }
+
+        button,
+        input,
+        select,
+        textarea {
+            font-family: inherit;
         }
 
         #portrait-warning {
@@ -61,23 +80,34 @@
 
         #controls {
             position: absolute;
-            top: 10px;
-            left: 10px;
+            top: max(10px, env(safe-area-inset-top));
+            left: max(10px, env(safe-area-inset-left));
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 8px;
             z-index: 2;
+            width: min(320px, calc(100vw - 20px));
+            padding: 10px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: linear-gradient(160deg, rgba(20, 20, 20, 0.82), rgba(10, 10, 10, 0.7));
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+            backdrop-filter: blur(8px);
+            box-sizing: border-box;
         }
 
         #upload,
         #urlBtn,
         #genBtn {
+            width: 100%;
             padding: 8px 16px;
             background: rgba(30, 30, 30, 0.8);
             color: #fff;
             border: 1px solid #666;
             cursor: pointer;
             font-size: 14px;
+            border-radius: 8px;
+            box-sizing: border-box;
         }
 
         #upload:hover,
@@ -97,11 +127,13 @@
         #urlInput {
             display: none;
             padding: 6px;
-            width: 280px;
+            width: 100%;
             background: rgba(30, 30, 30, 0.9);
             color: #fff;
             border: 1px solid #666;
             font-size: 12px;
+            border-radius: 8px;
+            box-sizing: border-box;
         }
 
         #urlInput::placeholder {
@@ -112,6 +144,38 @@
             display: flex;
             flex-direction: column;
             gap: 4px;
+        }
+
+        .settings-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px;
+            border: 1px solid #444;
+            border-radius: 10px;
+            background: rgba(18, 18, 18, 0.72);
+            color: #ddd;
+            font-size: 12px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .settings-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #9ed39e;
+        }
+
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .settings-panel input[type="range"] {
+            width: 100%;
+            margin: 0;
         }
 
         #info {
@@ -125,6 +189,24 @@
             padding: 6px 12px;
             border-radius: 4px;
             z-index: 2;
+            max-width: min(90vw, 760px);
+            text-align: center;
+            box-sizing: border-box;
+            backdrop-filter: blur(4px);
+        }
+
+        @media (max-width: 768px) {
+            #controls {
+                left: 50%;
+                transform: translateX(-50%);
+                width: min(92vw, 360px);
+            }
+
+            #info {
+                width: calc(100vw - 20px);
+                font-size: 11px;
+                bottom: 8px;
+            }
         }
 
         #winModal {
@@ -289,6 +371,34 @@
             <div class="input-group">
                 <button id="urlBtn">Load from URL</button>
                 <input type="text" id="urlInput" placeholder="Enter image URL and press Enter..." />
+            </div>
+            <div id="settingsPanel" class="settings-panel">
+                <div class="settings-title">Render Settings</div>
+                <div class="settings-row">
+                    <label for="superSampleScaleInput">Supersample</label>
+                    <span id="superSampleScaleValue">1.50x</span>
+                </div>
+                <input
+                    id="superSampleScaleInput"
+                    type="range"
+                    min="0.25"
+                    max="4"
+                    step="0.05"
+                    value="1.5"
+                />
+
+                <div class="settings-row">
+                    <label for="fovInput">FOV</label>
+                    <span id="fovValue">60°</span>
+                </div>
+                <input
+                    id="fovInput"
+                    type="range"
+                    min="45"
+                    max="100"
+                    step="1"
+                    value="60"
+                />
             </div>
         </div>
         <canvas id="canvas" width="800" height="600"></canvas>

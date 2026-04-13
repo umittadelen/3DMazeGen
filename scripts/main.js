@@ -1,13 +1,21 @@
 const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+const displayCtx = canvas.getContext('2d', { alpha: false });
+const renderCanvas = document.createElement('canvas');
+const renderCtx = renderCanvas.getContext('2d', { alpha: false });
 let minimap = document.getElementById('minimap');
 let minimapCtx = null;
 const info = document.getElementById('info');
 const upload = document.getElementById('upload');
 const urlBtn = document.getElementById('urlBtn');
 const urlInput = document.getElementById('urlInput');
-let viewWidth = window.innerWidth;
-let viewHeight = window.innerHeight;
+const superSampleScaleInput = document.getElementById('superSampleScaleInput');
+const superSampleScaleValue = document.getElementById('superSampleScaleValue');
+const fovInput = document.getElementById('fovInput');
+const fovValue = document.getElementById('fovValue');
+let screenWidth = window.innerWidth;
+let screenHeight = window.innerHeight;
+let renderWidth = window.innerWidth;
+let renderHeight = window.innerHeight;
 
 // ---- ORIENTATION LOCK ----
 function checkOrientation() {
@@ -60,11 +68,45 @@ let running = false;
 let minimapVisible = false;
 let gameLoopId = null;
 let needsRender = true;
+let debugVisible = false;
+
+const debugOverlay = document.createElement('pre');
+debugOverlay.id = 'debugOverlay';
+debugOverlay.style.position = 'fixed';
+debugOverlay.style.left = '10px';
+debugOverlay.style.top = '10px';
+debugOverlay.style.margin = '0';
+debugOverlay.style.padding = '8px 10px';
+debugOverlay.style.background = 'rgba(0, 0, 0, 0.7)';
+debugOverlay.style.color = '#b8ffb8';
+debugOverlay.style.border = '1px solid rgba(184, 255, 184, 0.45)';
+debugOverlay.style.fontFamily = 'Consolas, Monaco, monospace';
+debugOverlay.style.fontSize = '12px';
+debugOverlay.style.lineHeight = '1.35';
+debugOverlay.style.whiteSpace = 'pre';
+debugOverlay.style.pointerEvents = 'none';
+debugOverlay.style.zIndex = '5000';
+debugOverlay.style.display = 'none';
+document.body.appendChild(debugOverlay);
+
+let fpsValue = 0;
+let frameTimeMs = 0;
+let fpsFrameCounter = 0;
+let fpsSampleStart = performance.now();
 
 let playerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
 
-let FOV = Math.PI / 3;
+const DEFAULT_FOV_DEGREES = 80;
+const MIN_FOV_DEGREES = 45;
+const MAX_FOV_DEGREES = 100;
+const DEFAULT_SUPER_SAMPLE_SCALE = 1.5;
+const MIN_SUPER_SAMPLE_SCALE = 0.25;
+const MAX_SUPER_SAMPLE_SCALE = 4;
+const SETTINGS_STORAGE_KEY = 'mazeRenderSettings';
+
+let fovDegrees = DEFAULT_FOV_DEGREES;
+let FOV = (fovDegrees * Math.PI) / 180;
 let NUM_RAYS = 1024;
 const MAX_DEPTH = 20;
 const FOG_COLOR = { r: 12, g: 25, b: 45 };
@@ -75,6 +117,8 @@ const MOVE_SPEED = 0.025;
 const ROT_SPEED = 0.025;
 const BASE_FRAME_SECONDS = 1 / 60;
 const MAX_DELTA_SECONDS = 0.1;
+let superSampleScale = DEFAULT_SUPER_SAMPLE_SCALE;
+const MAX_SUPERSAMPLE_PIXELS = 50000000;
 
 const keys = {};
 let mouseLocked = false;
@@ -350,9 +394,113 @@ function getTextureForCell(cellX, cellY) {
     return atlas;
 }
 
-function updateRayCount(cssWidth) {
+function updateRayCount(targetWidth) {
     // One ray per CSS pixel keeps wall strips exactly 1 screen pixel wide.
-    NUM_RAYS = Math.max(1, Math.floor(cssWidth));
+    NUM_RAYS = Math.max(1, Math.floor(targetWidth));
+}
+
+function updateDebugOverlay() {
+    if (!debugVisible) return;
+
+    const superSampleFactor = screenWidth > 0
+        ? (renderWidth / screenWidth).toFixed(2)
+        : '1.00';
+    const mazeStatus = maze
+        ? `${mazeWidth}x${mazeHeight}`
+        : 'not loaded';
+
+    debugOverlay.textContent = [
+        `FPS: ${fpsValue.toFixed(1)} | Frame: ${frameTimeMs.toFixed(2)} ms`,
+        `Screen: ${screenWidth}x${screenHeight}`,
+        `Render: ${renderWidth}x${renderHeight} (${superSampleFactor}x)`,
+        `Rays: ${NUM_RAYS}`,
+        `Player: x=${playerX.toFixed(2)} y=${playerY.toFixed(2)}`,
+        `Angle: ${playerAngle.toFixed(3)} | Pitch: ${playerPitch.toFixed(3)}`,
+        `Maze: ${mazeStatus}`,
+        `Run: ${running} | Minimap: ${minimapVisible} | Won: ${won}`,
+        `MouseLock: ${mouseLocked} | NeedsRender: ${needsRender}`,
+        'Tab: toggle debug'
+    ].join('\n');
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function saveRenderSettings() {
+    try {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+            superSampleScale,
+            fovDegrees
+        }));
+    } catch (err) {
+        // Ignore storage failures (private mode/quota) and continue with in-memory values.
+    }
+}
+
+function loadRenderSettings() {
+    try {
+        const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+
+        if (parsed && Number.isFinite(parsed.superSampleScale)) {
+            superSampleScale = clamp(parsed.superSampleScale, MIN_SUPER_SAMPLE_SCALE, MAX_SUPER_SAMPLE_SCALE);
+        }
+        if (parsed && Number.isFinite(parsed.fovDegrees)) {
+            fovDegrees = clamp(parsed.fovDegrees, MIN_FOV_DEGREES, MAX_FOV_DEGREES);
+            FOV = (fovDegrees * Math.PI) / 180;
+        }
+    } catch (err) {
+        // Ignore corrupted settings and keep defaults.
+    }
+}
+
+function syncRenderSettingsUi() {
+    if (superSampleScaleInput) superSampleScaleInput.value = superSampleScale.toFixed(2);
+    if (superSampleScaleValue) superSampleScaleValue.textContent = `${superSampleScale.toFixed(2)}x`;
+    if (fovInput) fovInput.value = String(Math.round(fovDegrees));
+    if (fovValue) fovValue.textContent = `${Math.round(fovDegrees)}°`;
+}
+
+function initLoadScreenSettings() {
+    if (!superSampleScaleInput || !fovInput) {
+        return;
+    }
+
+    loadRenderSettings();
+    syncRenderSettingsUi();
+
+    superSampleScaleInput.addEventListener('input', () => {
+        const nextValue = Number(superSampleScaleInput.value);
+        if (!Number.isFinite(nextValue)) return;
+        superSampleScale = clamp(nextValue, MIN_SUPER_SAMPLE_SCALE, MAX_SUPER_SAMPLE_SCALE);
+        syncRenderSettingsUi();
+        saveRenderSettings();
+        resizeCanvas();
+    });
+
+    fovInput.addEventListener('input', () => {
+        const nextValue = Number(fovInput.value);
+        if (!Number.isFinite(nextValue)) return;
+        fovDegrees = clamp(nextValue, MIN_FOV_DEGREES, MAX_FOV_DEGREES);
+        FOV = (fovDegrees * Math.PI) / 180;
+        syncRenderSettingsUi();
+        saveRenderSettings();
+        needsRender = true;
+    });
+}
+
+function toggleDebugOverlay() {
+    debugVisible = !debugVisible;
+    debugOverlay.style.display = debugVisible ? 'block' : 'none';
+    if (debugVisible) updateDebugOverlay();
+}
+
+function presentFrame() {
+    displayCtx.setTransform(1, 0, 0, 1, 0, 0);
+    displayCtx.clearRect(0, 0, screenWidth, screenHeight);
+    displayCtx.drawImage(renderCanvas, 0, 0, renderWidth, renderHeight, 0, 0, screenWidth, screenHeight);
 }
 
 function resizeCanvas() {
@@ -360,24 +508,39 @@ function resizeCanvas() {
     const cssWidth = window.innerWidth;
     const cssHeight = window.innerHeight;
 
-    updateRayCount(cssWidth);
+    screenWidth = Math.floor(cssWidth * dpr);
+    screenHeight = Math.floor(cssHeight * dpr);
 
-    viewWidth = Math.floor(cssWidth * dpr);
-    viewHeight = Math.floor(cssHeight * dpr);
+    const screenPixels = Math.max(1, screenWidth * screenHeight);
+    const maxScaleByPixels = Math.sqrt(MAX_SUPERSAMPLE_PIXELS / screenPixels);
+    const internalScale = Math.max(MIN_SUPER_SAMPLE_SCALE, Math.min(superSampleScale, maxScaleByPixels));
+
+    renderWidth = Math.max(1, Math.floor(screenWidth * internalScale));
+    renderHeight = Math.max(1, Math.floor(screenHeight * internalScale));
+
+    updateRayCount(renderWidth);
 
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
-    canvas.width = viewWidth;
-    canvas.height = viewHeight;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    canvas.width = screenWidth;
+    canvas.height = screenHeight;
+
+    renderCanvas.width = renderWidth;
+    renderCanvas.height = renderHeight;
+    renderCtx.setTransform(1, 0, 0, 1, 0, 0);
 
     minimap.width = MINIMAP_SIZE;
     minimap.height = MINIMAP_SIZE;
-    ctx.imageSmoothingEnabled = false;
+    // Smooth downsampling from the supersampled render target to the display canvas.
+    displayCtx.imageSmoothingEnabled = true;
+    displayCtx.imageSmoothingQuality = 'high';
+    renderCtx.imageSmoothingEnabled = false;
     minimapCtx.imageSmoothingEnabled = false;
     needsRender = true;
+    updateDebugOverlay();
 }
 
+initLoadScreenSettings();
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
@@ -454,8 +617,9 @@ upload.addEventListener('change', (e) => {
 
 // URL upload
 urlBtn.addEventListener('click', () => {
-    urlInput.style.display = urlInput.style.display === 'none' ? 'block' : 'none';
-    if (urlInput.style.display === 'block') {
+    const isHidden = window.getComputedStyle(urlInput).display === 'none';
+    urlInput.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
         urlInput.focus();
     }
 });
@@ -465,17 +629,62 @@ function getQueryParam(name) {
     return params.get(name);
 }
 
+function isMazeUrl(url) {
+    try {
+        const parsed = new URL(url, window.location.href);
+        return parsed.pathname.toLowerCase().endsWith('.maze');
+    } catch {
+        return url.split('?')[0].toLowerCase().endsWith('.maze');
+    }
+}
+
+async function loadFromUrl(url) {
+    if (isMazeUrl(url)) {
+        let response;
+        try {
+            response = await fetch(url, { mode: 'cors' });
+        } catch {
+            showError('Failed to fetch .maze from URL. Check CORS or URL validity.');
+            return;
+        }
+
+        if (!response.ok) {
+            showError(`Failed to fetch .maze file (HTTP ${response.status})`);
+            return;
+        }
+
+        let arrayBuffer;
+        try {
+            arrayBuffer = await response.arrayBuffer();
+        } catch {
+            showError('Failed to read .maze response data');
+            return;
+        }
+
+        if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+            showError('.maze file is empty');
+            return;
+        }
+
+        const loaded = await loadMazeFormat(arrayBuffer);
+        if (loaded) hideControls();
+        return;
+    }
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+        loadMaze(img);
+        hideControls();
+    };
+    img.onerror = () => showError('Failed to load image from URL. Check CORS or URL validity.');
+    img.src = url;
+}
+
 window.addEventListener('DOMContentLoaded', () => {
     const url = getQueryParam('url');
     if (url) {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-            loadMaze(img);
-            hideControls();
-        };
-        img.onerror = () => showError('Failed to load image from URL. Check CORS or URL validity.');
-        img.src = url;
+        loadFromUrl(url);
     }
 });
 
@@ -487,14 +696,7 @@ urlInput.addEventListener('keypress', (e) => {
             return;
         }
 
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-            loadMaze(img);
-            hideControls();
-        };
-        img.onerror = () => showError('Failed to load image from URL. Check CORS or URL validity.');
-        img.src = url;
+        loadFromUrl(url);
     }
 });
 
@@ -734,14 +936,16 @@ function goBack() {
     info.style.display = 'block';
     
     // Clear canvas
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, viewWidth, viewHeight);
+    renderCtx.fillStyle = '#000';
+    renderCtx.fillRect(0, 0, renderWidth, renderHeight);
+    presentFrame();
+    updateDebugOverlay();
 }
 
 // OPTIMIZED: DDA ray casting algorithm
-function castRay(angle) {
-    const dirX = Math.cos(angle);
-    const dirY = Math.sin(angle);
+function castRay(rayDirX, rayDirY) {
+    const dirX = rayDirX;
+    const dirY = rayDirY;
 
     let mapX = Math.floor(playerX);
     let mapY = Math.floor(playerY);
@@ -861,7 +1065,7 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
 
             texX = Math.max(0, Math.min(wallTexture.width - 1, texX));
 
-            ctx.drawImage(
+            renderCtx.drawImage(
                 wallTexture,
                 texX,
                 0,
@@ -874,12 +1078,12 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
             );
 
             if (result.hitSide === 1) {
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
-                ctx.fillRect(x, y, stripWidth, wallHeight);
+                renderCtx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+                renderCtx.fillRect(x, y, stripWidth, wallHeight);
             }
 
-            ctx.fillStyle = `rgba(12, 25, 45, ${fog})`;
-            ctx.fillRect(x, y, stripWidth, wallHeight);
+            renderCtx.fillStyle = `rgba(12, 25, 45, ${fog})`;
+            renderCtx.fillRect(x, y, stripWidth, wallHeight);
             return;
         }
     }
@@ -895,38 +1099,42 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
     g = Math.floor(g * (1 - fog) + FOG_COLOR.g * fog);
     b = Math.floor(b * (1 - fog) + FOG_COLOR.b * fog);
 
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-    ctx.fillRect(x, y, stripWidth, wallHeight);
+    renderCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    renderCtx.fillRect(x, y, stripWidth, wallHeight);
 }
 
 function render(collectRayData = false) {
-    const centerY = viewHeight / 2 + playerPitch * viewHeight / 2;
+    const centerY = renderHeight / 2 + playerPitch * renderHeight / 2;
 
     // Sky
-    ctx.fillStyle = `rgb(${SKY_COLOR.r}, ${SKY_COLOR.g}, ${SKY_COLOR.b})`;
-    ctx.fillRect(0, 0, viewWidth, centerY);
+    renderCtx.fillStyle = `rgb(${SKY_COLOR.r}, ${SKY_COLOR.g}, ${SKY_COLOR.b})`;
+    renderCtx.fillRect(0, 0, renderWidth, centerY);
 
     // Ground
-    ctx.fillStyle = `rgb(${GROUND_COLOR.r}, ${GROUND_COLOR.g}, ${GROUND_COLOR.b})`;
-    ctx.fillRect(0, centerY, viewWidth, viewHeight - centerY);
+    renderCtx.fillStyle = `rgb(${GROUND_COLOR.r}, ${GROUND_COLOR.g}, ${GROUND_COLOR.b})`;
+    renderCtx.fillRect(0, centerY, renderWidth, renderHeight - centerY);
 
     // Cast rays
     const rayData = collectRayData ? [] : null;
-    const startAngle = playerAngle - FOV / 2;
-    const angleStep = FOV / NUM_RAYS;
-    const planeDist = (viewWidth / 2) / Math.tan(FOV / 2);
+    const dirX = Math.cos(playerAngle);
+    const dirY = Math.sin(playerAngle);
+    const planeScale = Math.tan(FOV / 2);
+    const planeX = -dirY * planeScale;
+    const planeY = dirX * planeScale;
+    const planeDist = (renderWidth / 2) / Math.tan(FOV / 2);
     for (let i = 0; i < NUM_RAYS; i++) {
-        const rayAngle = startAngle + angleStep * i;
-        const result = castRay(rayAngle);
+        const cameraX = (2 * (i + 0.5)) / NUM_RAYS - 1;
+        const rayDirX = dirX + planeX * cameraX;
+        const rayDirY = dirY + planeY * cameraX;
+        const result = castRay(rayDirX, rayDirY);
         if (rayData) rayData.push(result);
 
-        const correctedDist = Math.max(result.dist * Math.cos(rayAngle - playerAngle), 0.0001);
-        const wallHeight = planeDist / correctedDist;
+        const wallHeight = planeDist / result.dist;
 
         // Fog using smoother exponential falloff
-        const fog = 1 - Math.exp(-correctedDist / (MAX_DEPTH * FOG_DISTANCE_FACTOR));
-        const x = Math.floor((i * viewWidth) / NUM_RAYS);
-        const nextX = Math.floor(((i + 1) * viewWidth) / NUM_RAYS);
+        const fog = 1 - Math.exp(-result.dist / (MAX_DEPTH * FOG_DISTANCE_FACTOR));
+        const x = Math.floor((i * renderWidth) / NUM_RAYS);
+        const nextX = Math.floor(((i + 1) * renderWidth) / NUM_RAYS);
         const stripWidth = Math.max(1, nextX - x);
         const y = Math.round(centerY - wallHeight / 2);
         renderWallSlice(result, x, y, stripWidth, Math.ceil(wallHeight), fog);
@@ -1080,18 +1288,35 @@ function gameLoop(timestamp) {
             deltaSeconds = Math.min(deltaSeconds, MAX_DELTA_SECONDS);
         }
         lastFrameTimestamp = timestamp;
+
+        frameTimeMs = deltaSeconds * 1000;
+        fpsFrameCounter += 1;
+        const fpsWindowMs = timestamp - fpsSampleStart;
+        if (fpsWindowMs >= 250) {
+            fpsValue = (fpsFrameCounter * 1000) / fpsWindowMs;
+            fpsFrameCounter = 0;
+            fpsSampleStart = timestamp;
+        }
     }
 
     update(deltaSeconds);
     if (needsRender) {
         const rayData = render(minimapVisible);
         if (minimapVisible && rayData) renderMinimap(rayData);
+        presentFrame();
         needsRender = false;
     }
+    updateDebugOverlay();
     gameLoopId = requestAnimationFrame(gameLoop);
 }
 
 document.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        toggleDebugOverlay();
+        return;
+    }
+
     keys[e.key.toLowerCase()] = true;
     keys[e.key] = true;
 
@@ -1105,6 +1330,11 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('keyup', (e) => {
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        return;
+    }
+
     keys[e.key.toLowerCase()] = false;
     keys[e.key] = false;
 
@@ -1112,8 +1342,9 @@ document.addEventListener('keyup', (e) => {
 });
 
 canvas.addEventListener('click', () => {
+    const hasLoadedMaze = maze && mazeWidth > 0 && mazeHeight > 0;
     // Only request pointer lock on desktop (non-touch) devices
-    if (!isTouchDevice() && !mouseLocked && !pointerLockPending) {
+    if (!isTouchDevice() && hasLoadedMaze && !won && !mouseLocked && !pointerLockPending) {
         pointerLockPending = true;
         canvas.requestPointerLock().catch(() => {
             pointerLockPending = false;
