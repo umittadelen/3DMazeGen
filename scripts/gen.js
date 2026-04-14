@@ -887,43 +887,88 @@ findMaxSizeBtn.addEventListener('click', () => {
 });
 
 // ---- .MAZE FORMAT FUNCTIONS ----
+const MAZE_MAGIC_BYTES = [0x4d, 0x41, 0x5a, 0x45]; // "MAZE"
+const MAZE_FORMAT_VERSION = 2;
+
+function encodeVarint(value) {
+    if (!Number.isInteger(value) || value < 0) {
+        throw new Error('Varint value must be a non-negative integer');
+    }
+
+    const bytes = [];
+    let remaining = value;
+
+    do {
+        let byte = remaining & 0x7F;
+        remaining = Math.floor(remaining / 128);
+        if (remaining > 0) {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+    } while (remaining > 0);
+
+    return bytes;
+}
+
 function createMazeFormat(cells, width, height) {
-    // Determine bytes needed for dimensions using math
-    const maxDim = Math.max(width, height);
-    const bytesPerDim = Math.max(1, Math.ceil(maxDim.toString(16).length / 2));
-    
-    // Create header: [bytesPerDim][width bytes][height bytes]
-    const headerSize = 1 + bytesPerDim * 2;
-    const header = new Uint8Array(headerSize);
-    header[0] = bytesPerDim;
-    
-    // Write width (little-endian)
-    for (let i = 0; i < bytesPerDim; i++) {
-        header[1 + i] = (width >> (i * 8)) & 0xFF;
+    const totalCells = width * height;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 3 || height < 3) {
+        throw new Error('Maze dimensions must be integers >= 3');
     }
-    
-    // Write height (little-endian)
-    for (let i = 0; i < bytesPerDim; i++) {
-        header[1 + bytesPerDim + i] = (height >> (i * 8)) & 0xFF;
+    if (cells.length !== totalCells) {
+        throw new Error('Maze cell array length does not match dimensions');
     }
 
-    // Pack cells (2 bits per cell) into bytes
-    const dataBytes = Math.ceil(width * height * 2 / 8);
-    const dataArr = new Uint8Array(dataBytes);
-    let bitIndex = 0;
-    
-    for (let i = 0; i < cells.length; i++) {
+    let startIndex = -1;
+    let goalIndex = -1;
+    const mazeBytes = new Uint8Array(Math.ceil(totalCells / 8));
+
+    for (let i = 0; i < totalCells; i++) {
         const cell = cells[i] & 0b11;
-        const byteIndex = bitIndex >> 3;
-        const offset = 6 - (bitIndex % 8);
-        dataArr[byteIndex] |= cell << offset;
-        bitIndex += 2;
+
+        if (cell === R) {
+            if (startIndex !== -1) {
+                throw new Error('.maze V2 supports exactly one start cell');
+            }
+            startIndex = i;
+        } else if (cell === G) {
+            if (goalIndex !== -1) {
+                throw new Error('.maze V2 supports exactly one goal cell');
+            }
+            goalIndex = i;
+        }
+
+        const isWalkable = cell !== B;
+        if (isWalkable) {
+            mazeBytes[i >> 3] |= 1 << (7 - (i & 7));
+        }
     }
 
-    // Combine header and data
-    const result = new Uint8Array(headerSize + dataBytes);
-    result.set(header, 0);
-    result.set(dataArr, headerSize);
+    if (startIndex === -1 || goalIndex === -1) {
+        throw new Error('.maze V2 requires both a start and goal cell');
+    }
+
+    const widthBytes = encodeVarint(width);
+    const heightBytes = encodeVarint(height);
+    const startBytes = encodeVarint(startIndex);
+    const goalBytes = encodeVarint(goalIndex);
+
+    const headerSize = MAZE_MAGIC_BYTES.length + 1 + widthBytes.length + heightBytes.length + startBytes.length + goalBytes.length;
+    const result = new Uint8Array(headerSize + mazeBytes.length);
+    let offset = 0;
+
+    result.set(MAZE_MAGIC_BYTES, offset);
+    offset += MAZE_MAGIC_BYTES.length;
+    result[offset++] = MAZE_FORMAT_VERSION;
+    result.set(widthBytes, offset);
+    offset += widthBytes.length;
+    result.set(heightBytes, offset);
+    offset += heightBytes.length;
+    result.set(startBytes, offset);
+    offset += startBytes.length;
+    result.set(goalBytes, offset);
+    offset += goalBytes.length;
+    result.set(mazeBytes, offset);
 
     // Convert to blob URL for download
     const blob = new Blob([result], { type: 'application/octet-stream' });

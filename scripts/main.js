@@ -38,7 +38,9 @@ window.addEventListener('resize', checkOrientation);
 checkOrientation();
 
 const MINIMAP_SIZE = 150;
-const MINIMAP_RANGE = 5; // How many maze cells to show around player
+const MINIMAP_RANGE_STEP = 1;
+const MINIMAP_MIN_RANGE = 2;
+let minimapRange = 5;
 
 // Create minimap if it doesn't exist
 if (!minimap) {
@@ -48,6 +50,7 @@ if (!minimap) {
     minimap.style.top = '20px';
     minimap.style.right = '20px';
     minimap.style.border = '2px solid #fff';
+    minimap.style.borderRadius = '50%';
     minimap.style.display = 'none';
     minimap.style.zIndex = '1000';
     minimap.style.background = '#000';
@@ -100,7 +103,7 @@ const MAX_PITCH = Math.PI / 2 * 0.99;
 const DEFAULT_FOV_DEGREES = 80;
 const MIN_FOV_DEGREES = 45;
 const MAX_FOV_DEGREES = 100;
-const DEFAULT_SUPER_SAMPLE_SCALE = 1.5;
+const DEFAULT_SUPER_SAMPLE_SCALE = 1;
 const MIN_SUPER_SAMPLE_SCALE = 0.25;
 const MAX_SUPER_SAMPLE_SCALE = 4;
 const SETTINGS_STORAGE_KEY = 'mazeRenderSettings';
@@ -108,11 +111,29 @@ const SETTINGS_STORAGE_KEY = 'mazeRenderSettings';
 let fovDegrees = DEFAULT_FOV_DEGREES;
 let FOV = (fovDegrees * Math.PI) / 180;
 let NUM_RAYS = 1024;
-const MAX_DEPTH = 20;
-const FOG_COLOR = { r: 12, g: 25, b: 45 };
-const FOG_DISTANCE_FACTOR = 0.3;
-const SKY_COLOR = { r: 26, g: 26, b: 46 };  // #1a1a2e
-const GROUND_COLOR = { r: 15, g: 52, b: 96 }; // #0f3460
+// How far the raycaster checks for walls. Higher = can see farther, but costs more work per ray.
+const MAX_DEPTH = 8;
+minimapRange = Math.min(minimapRange, MAX_DEPTH);
+// Background sky tint. Lower RGB values make the upper half of the screen closer to black.
+const SKY_COLOR = { r: 8, g: 10, b: 14 };
+// Far fog target color. Pure black means the far distance fades all the way to black.
+const FOG_COLOR = { r: 0, g: 0, b: 0 };
+const FOG_IS_BLACK = FOG_COLOR.r === 0 && FOG_COLOR.g === 0 && FOG_COLOR.b === 0;
+// Background floor tint. Lower RGB values make the lower half of the screen darker.
+const GROUND_COLOR = { r: 5, g: 6, b: 8 };
+// Overall distance darkening on walls. Higher = far walls get much darker, lower = depth looks flatter.
+const DISTANCE_SHADOW_STRENGTH = 0.82;
+// Global fog amount multiplier. 1 means halfway to MAX_DEPTH is 50% fog and MAX_DEPTH is full fog.
+const FOG_BLEND_STRENGTH = 1;
+// Minecraft-style brightness lift. Higher values brighten mid/dark wall shading without removing full-black fog.
+const GAMMA = 2.2;
+// Base darkness applied to every wall face so nothing looks fully bright. Higher = all walls look moodier.
+const FACE_SHADOW_STRENGTH = 0.12;
+const SIDE_SHADOW_STRENGTH = 0.12;
+// Fixed world light direction so north/south/east/west faces do not all shade the same.
+const WALL_LIGHT_DIR_X = -0.78;
+const WALL_LIGHT_DIR_Y = -0.62;
+const DIRECTIONAL_FACE_SHADOW_STRENGTH = 0.16;
 const MOVE_SPEED = 0.025;
 const ROT_SPEED = 0.025;
 const BASE_FRAME_SECONDS = 1 / 60;
@@ -125,6 +146,9 @@ let mouseLocked = false;
 let ignoreMouseMovement = false;
 let pointerLockPending = false;  // Flag to prevent simultaneous lock/unlock requests
 let lastFrameTimestamp = null;
+let backgroundGradientCacheKey = '';
+let cachedSkyGradient = null;
+let cachedGroundGradient = null;
 
 let mazeWorker = null;
 let mazeWorkerRequestId = 0;
@@ -166,66 +190,83 @@ function initMazeWorker() {
 }
 
 function parseMazeFormatSync(arrayBuffer) {
-    if (!arrayBuffer || arrayBuffer.byteLength < 3) {
-        throw new Error('.maze file is corrupted (too small)');
+    if (!arrayBuffer || arrayBuffer.byteLength < 8) {
+        throw new Error('.maze file is corrupted (too small for V2 header)');
     }
 
-    const view = new DataView(arrayBuffer);
-    const bytesPerDim = view.getUint8(0);
-    if (bytesPerDim < 1 || bytesPerDim > 4) {
-        throw new Error('.maze file has invalid header');
+    const bytes = new Uint8Array(arrayBuffer);
+    if (bytes[0] !== 0x4d || bytes[1] !== 0x41 || bytes[2] !== 0x5a || bytes[3] !== 0x45) {
+        throw new Error('Invalid .maze file magic; expected MAZE V2 format');
+    }
+    if (bytes[4] !== 2) {
+        throw new Error('Unsupported .maze version: ' + bytes[4]);
     }
 
-    let width = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        width |= view.getUint8(1 + i) << (i * 8);
+    let offset = 5;
+
+    function readVarint(fieldName) {
+        let value = 0;
+        let shift = 0;
+
+        for (let i = 0; i < 5; i++) {
+            if (offset >= bytes.length) {
+                throw new Error('.maze file is truncated while reading ' + fieldName);
+            }
+
+            const byte = bytes[offset++];
+            value += (byte & 0x7F) * (2 ** shift);
+            if ((byte & 0x80) === 0) {
+                if (!Number.isSafeInteger(value)) {
+                    throw new Error('.maze ' + fieldName + ' exceeds safe integer range');
+                }
+                return value;
+            }
+            shift += 7;
+        }
+
+        throw new Error('.maze ' + fieldName + ' varint is too large');
     }
 
-    let height = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        height |= view.getUint8(1 + bytesPerDim + i) << (i * 8);
-    }
+    const width = readVarint('width');
+    const height = readVarint('height');
+    const startIndex = readVarint('start index');
+    const goalIndex = readVarint('goal index');
 
     if (width < 3 || height < 3 || width > 50000 || height > 50000) {
         throw new Error('.maze file has invalid dimensions: ' + width + 'x' + height);
     }
 
     const totalCells = width * height;
-    if (!Number.isFinite(totalCells) || totalCells <= 0) {
+    if (!Number.isSafeInteger(totalCells) || totalCells <= 0) {
         throw new Error('.maze file dimensions overflowed');
     }
-
-    const headerSize = 1 + bytesPerDim * 2;
-    const expectedSize = headerSize + Math.ceil(totalCells * 2 / 8);
-    if (arrayBuffer.byteLength < expectedSize) {
-        throw new Error('.maze file is truncated or corrupted');
+    if (startIndex < 0 || startIndex >= totalCells || goalIndex < 0 || goalIndex >= totalCells) {
+        throw new Error('.maze file has invalid start or goal index');
     }
 
-    const data = new Uint8Array(arrayBuffer, headerSize);
+    const expectedMazeBytes = Math.ceil(totalCells / 8);
+    const expectedSize = offset + expectedMazeBytes;
+    if (bytes.length !== expectedSize) {
+        throw new Error('.maze file size does not match V2 payload length');
+    }
+
+    const packed = bytes.subarray(offset);
     const cells = new Uint8Array(totalCells);
 
-    let startIndex = -1;
-    let goalIndex = -1;
-    let bitIndex = 0;
-
     for (let i = 0; i < totalCells; i++) {
-        const byteIndex = bitIndex >> 3;
-        if (byteIndex >= data.length) {
-            throw new Error('.maze file data is corrupted');
-        }
-
-        const offset = 6 - (bitIndex % 8);
-        const cell = (data[byteIndex] >> offset) & 0b11;
-        bitIndex += 2;
-
-        cells[i] = cell;
-        if (cell === 2 && startIndex === -1) startIndex = i;
-        if (cell === 3 && goalIndex === -1) goalIndex = i;
+        const isWalkable = ((packed[i >> 3] >> (7 - (i & 7))) & 1) === 1;
+        cells[i] = isWalkable ? 1 : 0;
     }
 
-    if (startIndex === -1 || goalIndex === -1) {
-        throw new Error('Invalid .maze file: missing start or goal');
+    if (startIndex === goalIndex) {
+        throw new Error('.maze file start and goal cannot be the same cell');
     }
+    if (cells[startIndex] === 0 || cells[goalIndex] === 0) {
+        throw new Error('.maze file start and goal must be on walkable cells');
+    }
+
+    cells[startIndex] = 2;
+    cells[goalIndex] = 3;
 
     return { width, height, cells, startIndex, goalIndex };
 }
@@ -264,16 +305,16 @@ const wallTextures = [];
 let wallTexturesReady = false;
 const textureNames = ['bricks.png', 'bricks1.png', 'bricks2.png'];
 const WALL_TEXTURE_REPEAT = 7; // Set to 4 for 4x4 tiling
-const MAX_WALL_ATLAS_CACHE = 512;
+const WALL_ATLAS_VARIANTS = 24;
 let pendingTextureLoads = textureNames.length;
 let mazeTextureSeed = 2166136261 >>> 0;
-const wallTextureAtlasCache = new Map();
+const wallTextureAtlases = [];
 
 function clearWallTextureAtlasCache() {
-    wallTextureAtlasCache.clear();
+    wallTextureAtlases.length = 0;
 }
 
-function createRandomizedCellAtlas(cellX, cellY) {
+function createRandomizedCellAtlas(variantIndex) {
     if (wallTextures.length === 0) return null;
 
     const base = wallTextures[0];
@@ -283,15 +324,16 @@ function createRandomizedCellAtlas(cellX, cellY) {
     const atlas = document.createElement('canvas');
     atlas.width = tileWidth * WALL_TEXTURE_REPEAT;
     atlas.height = tileHeight * WALL_TEXTURE_REPEAT;
-    const atlasCtx = atlas.getContext('2d');
+
+    const atlasCtx = atlas.getContext('2d', { alpha: false });
     atlasCtx.imageSmoothingEnabled = false;
 
     for (let ty = 0; ty < WALL_TEXTURE_REPEAT; ty++) {
         for (let tx = 0; tx < WALL_TEXTURE_REPEAT; tx++) {
             const subtileHash = hashCoord(
-                mazeTextureSeed ^ 0x9e3779b9,
-                cellX * WALL_TEXTURE_REPEAT + tx,
-                cellY * WALL_TEXTURE_REPEAT + ty
+                mazeTextureSeed ^ Math.imul((variantIndex + 1), 0x9e3779b9),
+                tx,
+                ty
             );
             const src = wallTextures[subtileHash % wallTextures.length];
             atlasCtx.drawImage(
@@ -311,6 +353,18 @@ function createRandomizedCellAtlas(cellX, cellY) {
     return atlas;
 }
 
+function rebuildWallTextureAtlases() {
+    clearWallTextureAtlasCache();
+    if (!wallTexturesReady || wallTextures.length === 0) return;
+
+    for (let i = 0; i < WALL_ATLAS_VARIANTS; i++) {
+        const atlas = createRandomizedCellAtlas(i);
+        if (atlas) {
+            wallTextureAtlases.push(atlas);
+        }
+    }
+}
+
 textureNames.forEach((name) => {
     const texture = new Image();
 
@@ -319,6 +373,7 @@ textureNames.forEach((name) => {
         pendingTextureLoads -= 1;
         if (pendingTextureLoads === 0) {
             wallTexturesReady = true;
+            rebuildWallTextureAtlases();
             needsRender = true;
         }
     });
@@ -328,6 +383,7 @@ textureNames.forEach((name) => {
         pendingTextureLoads -= 1;
         if (pendingTextureLoads === 0) {
             wallTexturesReady = wallTextures.length > 0;
+            rebuildWallTextureAtlases();
             needsRender = true;
         }
     });
@@ -373,29 +429,13 @@ function hashCoord(seed, x, y) {
 }
 
 function getTextureForCell(cellX, cellY) {
-    if (!wallTexturesReady || wallTextures.length === 0) return null;
-    const key = cellY * mazeWidth + cellX;
-    const cached = wallTextureAtlasCache.get(key);
-    if (cached) {
-        return cached;
-    }
-
-    const atlas = createRandomizedCellAtlas(cellX, cellY);
-    if (!atlas) return null;
-
-    wallTextureAtlasCache.set(key, atlas);
-
-    // Keep memory and GC pressure bounded.
-    if (wallTextureAtlasCache.size > MAX_WALL_ATLAS_CACHE) {
-        const firstKey = wallTextureAtlasCache.keys().next().value;
-        wallTextureAtlasCache.delete(firstKey);
-    }
-
-    return atlas;
+    if (!wallTexturesReady || wallTextureAtlases.length === 0) return null;
+    const textureHash = hashCoord(mazeTextureSeed, cellX, cellY);
+    return wallTextureAtlases[textureHash % wallTextureAtlases.length];
 }
 
 function updateRayCount(targetWidth) {
-    // One ray per CSS pixel keeps wall strips exactly 1 screen pixel wide.
+    // Keep one ray per internal render pixel so supersampling scales ray density exactly with render resolution.
     NUM_RAYS = Math.max(1, Math.floor(targetWidth));
 }
 
@@ -503,6 +543,24 @@ function presentFrame() {
     displayCtx.drawImage(renderCanvas, 0, 0, renderWidth, renderHeight, 0, 0, screenWidth, screenHeight);
 }
 
+function updateBackgroundGradients(centerY) {
+    const roundedCenterY = Math.round(centerY);
+    const cacheKey = `${renderWidth}x${renderHeight}:${roundedCenterY}`;
+    if (backgroundGradientCacheKey === cacheKey && cachedSkyGradient && cachedGroundGradient) {
+        return;
+    }
+
+    backgroundGradientCacheKey = cacheKey;
+
+    cachedSkyGradient = renderCtx.createLinearGradient(0, 0, 0, roundedCenterY);
+    cachedSkyGradient.addColorStop(0, 'rgb(3, 4, 6)');
+    cachedSkyGradient.addColorStop(1, `rgb(${SKY_COLOR.r}, ${SKY_COLOR.g}, ${SKY_COLOR.b})`);
+
+    cachedGroundGradient = renderCtx.createLinearGradient(0, roundedCenterY, 0, renderHeight);
+    cachedGroundGradient.addColorStop(0, 'rgb(8, 9, 12)');
+    cachedGroundGradient.addColorStop(1, `rgb(${GROUND_COLOR.r}, ${GROUND_COLOR.g}, ${GROUND_COLOR.b})`);
+}
+
 function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
     const cssWidth = window.innerWidth;
@@ -528,6 +586,9 @@ function resizeCanvas() {
     renderCanvas.width = renderWidth;
     renderCanvas.height = renderHeight;
     renderCtx.setTransform(1, 0, 0, 1, 0, 0);
+    backgroundGradientCacheKey = '';
+    cachedSkyGradient = null;
+    cachedGroundGradient = null;
 
     minimap.width = MINIMAP_SIZE;
     minimap.height = MINIMAP_SIZE;
@@ -755,6 +816,7 @@ function loadMaze(img) {
 
     mazeTextureSeed = computeMazeLayoutSeed(mazeWidth, mazeHeight, maze);
     clearWallTextureAtlasCache();
+    rebuildWallTextureAtlases();
 
     won = false;
     playerAngle = getInitialPlayerAngle();
@@ -791,6 +853,7 @@ async function loadMazeFormat(arrayBuffer) {
 
     mazeTextureSeed = computeMazeLayoutSeed(mazeWidth, mazeHeight, maze);
     clearWallTextureAtlasCache();
+    rebuildWallTextureAtlases();
     
     won = false;
     playerAngle = getInitialPlayerAngle();
@@ -1049,7 +1112,17 @@ function castRay(rayDirX, rayDirY) {
     };
 }
 
-function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
+function renderWallSlice(result, x, y, stripWidth, wallHeight, fog, distanceShadow) {
+    const fogBlend = Math.min(1, fog * FOG_BLEND_STRENGTH);
+    const normalX = result.hitSide === 0 ? (result.dirX > 0 ? -1 : 1) : 0;
+    const normalY = result.hitSide === 1 ? (result.dirY > 0 ? -1 : 1) : 0;
+    const directionalLight = Math.max(0, (normalX * WALL_LIGHT_DIR_X) + (normalY * WALL_LIGHT_DIR_Y));
+    const faceShadow = FACE_SHADOW_STRENGTH
+        + (result.hitSide === 1 ? SIDE_SHADOW_STRENGTH : 0)
+        + ((1 - directionalLight) * DIRECTIONAL_FACE_SHADOW_STRENGTH);
+    const combinedShadow = Math.min(0.96, 1 - ((1 - faceShadow) * (1 - distanceShadow)));
+    const gammaShadow = 1 - Math.pow(1 - combinedShadow, 1 / GAMMA);
+
     if (wallTexturesReady && result.hitType === 0) {
         const wallTexture = getTextureForCell(result.hitMapX, result.hitMapY);
         if (wallTexture) {
@@ -1077,13 +1150,23 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
                 wallHeight
             );
 
-            if (result.hitSide === 1) {
-                renderCtx.fillStyle = 'rgba(0, 0, 0, 0.18)';
-                renderCtx.fillRect(x, y, stripWidth, wallHeight);
-            }
+            if (FOG_IS_BLACK) {
+                const darkenAlpha = 1 - ((1 - gammaShadow) * (1 - fogBlend));
+                if (darkenAlpha > 0) {
+                    renderCtx.fillStyle = `rgba(0, 0, 0, ${darkenAlpha})`;
+                    renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                }
+            } else {
+                if (gammaShadow > 0) {
+                    renderCtx.fillStyle = `rgba(0, 0, 0, ${gammaShadow})`;
+                    renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                }
 
-            renderCtx.fillStyle = `rgba(12, 25, 45, ${fog})`;
-            renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                if (fogBlend > 0) {
+                    renderCtx.fillStyle = `rgba(${FOG_COLOR.r}, ${FOG_COLOR.g}, ${FOG_COLOR.b}, ${fogBlend})`;
+                    renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                }
+            }
             return;
         }
     }
@@ -1095,9 +1178,14 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
         r = 0; g = 100; b = 255;
     }
 
-    r = Math.floor(r * (1 - fog) + FOG_COLOR.r * fog);
-    g = Math.floor(g * (1 - fog) + FOG_COLOR.g * fog);
-    b = Math.floor(b * (1 - fog) + FOG_COLOR.b * fog);
+    const lightness = Math.pow(Math.max(0.12, 1 - combinedShadow), 1 / GAMMA);
+    r = Math.floor(r * lightness);
+    g = Math.floor(g * lightness);
+    b = Math.floor(b * lightness);
+
+    r = Math.floor(r * (1 - fogBlend) + FOG_COLOR.r * fogBlend);
+    g = Math.floor(g * (1 - fogBlend) + FOG_COLOR.g * fogBlend);
+    b = Math.floor(b * (1 - fogBlend) + FOG_COLOR.b * fogBlend);
 
     renderCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
     renderCtx.fillRect(x, y, stripWidth, wallHeight);
@@ -1106,12 +1194,12 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog) {
 function render(collectRayData = false) {
     const centerY = renderHeight / 2 + playerPitch * renderHeight / 2;
 
-    // Sky
-    renderCtx.fillStyle = `rgb(${SKY_COLOR.r}, ${SKY_COLOR.g}, ${SKY_COLOR.b})`;
+    updateBackgroundGradients(centerY);
+
+    renderCtx.fillStyle = cachedSkyGradient;
     renderCtx.fillRect(0, 0, renderWidth, centerY);
 
-    // Ground
-    renderCtx.fillStyle = `rgb(${GROUND_COLOR.r}, ${GROUND_COLOR.g}, ${GROUND_COLOR.b})`;
+    renderCtx.fillStyle = cachedGroundGradient;
     renderCtx.fillRect(0, centerY, renderWidth, renderHeight - centerY);
 
     // Cast rays
@@ -1130,37 +1218,50 @@ function render(collectRayData = false) {
         if (rayData) rayData.push(result);
 
         const wallHeight = planeDist / result.dist;
-
-        // Fog using smoother exponential falloff
-        const fog = 1 - Math.exp(-result.dist / (MAX_DEPTH * FOG_DISTANCE_FACTOR));
+        const distanceRatio = clamp(result.dist / MAX_DEPTH, 0, 1);
+        const distanceRatioSq = distanceRatio * distanceRatio;
+        const distanceShadow = Math.min(0.9, distanceRatioSq * (0.7 + distanceRatio * 0.3) * DISTANCE_SHADOW_STRENGTH);
+        const fog = distanceRatio;
         const x = Math.floor((i * renderWidth) / NUM_RAYS);
         const nextX = Math.floor(((i + 1) * renderWidth) / NUM_RAYS);
         const stripWidth = Math.max(1, nextX - x);
         const y = Math.round(centerY - wallHeight / 2);
-        renderWallSlice(result, x, y, stripWidth, Math.ceil(wallHeight), fog);
+        renderWallSlice(result, x, y, stripWidth, Math.ceil(wallHeight), fog, distanceShadow);
     }
 
     return rayData;
 }
 
 function renderMinimap(rayData) {
+    const visibleRange = Math.min(minimapRange, MAX_DEPTH);
+    const scale = MINIMAP_SIZE / (visibleRange * 2);
+    const centerX = MINIMAP_SIZE / 2;
+    const centerY = MINIMAP_SIZE / 2;
+    const clipRadius = MINIMAP_SIZE / 2 - 2;
+    const visibleRangeSq = visibleRange * visibleRange;
+
+    minimapCtx.clearRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
+    minimapCtx.save();
+    minimapCtx.beginPath();
+    minimapCtx.arc(centerX, centerY, clipRadius, 0, Math.PI * 2);
+    minimapCtx.clip();
     minimapCtx.fillStyle = '#000';
     minimapCtx.fillRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
 
-    const scale = MINIMAP_SIZE / (MINIMAP_RANGE * 2);
-    const centerX = MINIMAP_SIZE / 2;
-    const centerY = MINIMAP_SIZE / 2;
-
     // Calculate visible bounds
-    const minX = Math.floor(playerX - MINIMAP_RANGE);
-    const maxX = Math.ceil(playerX + MINIMAP_RANGE);
-    const minY = Math.floor(playerY - MINIMAP_RANGE);
-    const maxY = Math.ceil(playerY + MINIMAP_RANGE);
+    const minX = Math.floor(playerX - visibleRange);
+    const maxX = Math.ceil(playerX + visibleRange);
+    const minY = Math.floor(playerY - visibleRange);
+    const maxY = Math.ceil(playerY + visibleRange);
 
     // Draw maze cells in view
     for (let my = minY; my <= maxY; my++) {
         for (let mx = minX; mx <= maxX; mx++) {
             if (mx < 0 || mx >= mazeWidth || my < 0 || my >= mazeHeight) continue;
+
+            const offsetX = (mx + 0.5) - playerX;
+            const offsetY = (my + 0.5) - playerY;
+            if ((offsetX * offsetX) + (offsetY * offsetY) > visibleRangeSq) continue;
             
             const cell = maze[my * mazeWidth + mx];
             const screenX = centerX + (mx - playerX) * scale;
@@ -1182,13 +1283,32 @@ function renderMinimap(rayData) {
     minimapCtx.lineWidth = 0.5;
     for (let i = 0; i < rayData.length; i += 5) { // Draw every 5th ray for performance
         const ray = rayData[i];
+        let endX = ray.hitX;
+        let endY = ray.hitY;
+        const rayDeltaX = endX - playerX;
+        const rayDeltaY = endY - playerY;
+        const rayLengthSq = (rayDeltaX * rayDeltaX) + (rayDeltaY * rayDeltaY);
+        if (rayLengthSq > visibleRangeSq && rayLengthSq > 0) {
+            const clipScale = visibleRange / Math.sqrt(rayLengthSq);
+            endX = playerX + rayDeltaX * clipScale;
+            endY = playerY + rayDeltaY * clipScale;
+        }
+
         minimapCtx.beginPath();
         minimapCtx.moveTo(centerX, centerY);
-        const hitScreenX = centerX + (ray.hitX - playerX) * scale;
-        const hitScreenY = centerY + (ray.hitY - playerY) * scale;
+        const hitScreenX = centerX + (endX - playerX) * scale;
+        const hitScreenY = centerY + (endY - playerY) * scale;
         minimapCtx.lineTo(hitScreenX, hitScreenY);
         minimapCtx.stroke();
     }
+
+    minimapCtx.restore();
+
+    minimapCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    minimapCtx.lineWidth = 1;
+    minimapCtx.beginPath();
+    minimapCtx.arc(centerX, centerY, clipRadius, 0, Math.PI * 2);
+    minimapCtx.stroke();
 
     // Draw player direction indicator
     minimapCtx.strokeStyle = '#fff';
@@ -1314,6 +1434,20 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab') {
         e.preventDefault();
         toggleDebugOverlay();
+        return;
+    }
+
+    if (e.key === '+' || e.key === '=') {
+        minimapRange = Math.max(MINIMAP_MIN_RANGE, minimapRange - MINIMAP_RANGE_STEP);
+        needsRender = true;
+        e.preventDefault();
+        return;
+    }
+
+    if (e.key === '\\') {
+        minimapRange = Math.min(MAX_DEPTH, minimapRange + MINIMAP_RANGE_STEP);
+        needsRender = true;
+        e.preventDefault();
         return;
     }
 

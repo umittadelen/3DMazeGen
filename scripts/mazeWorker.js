@@ -23,70 +23,83 @@ self.addEventListener('message', (event) => {
 });
 
 function parseMazeFormat(arrayBuffer) {
-    if (!arrayBuffer || arrayBuffer.byteLength < 3) {
-        throw new Error('.maze file is corrupted (too small)');
+    if (!arrayBuffer || arrayBuffer.byteLength < 8) {
+        throw new Error('.maze file is corrupted (too small for V2 header)');
     }
 
-    const view = new DataView(arrayBuffer);
-    const bytesPerDim = view.getUint8(0);
-    if (bytesPerDim < 1 || bytesPerDim > 4) {
-        throw new Error('.maze file has invalid header');
+    const bytes = new Uint8Array(arrayBuffer);
+    if (bytes[0] !== 0x4d || bytes[1] !== 0x41 || bytes[2] !== 0x5a || bytes[3] !== 0x45) {
+        throw new Error('Invalid .maze file magic; expected MAZE V2 format');
+    }
+    if (bytes[4] !== 2) {
+        throw new Error('Unsupported .maze version: ' + bytes[4]);
     }
 
-    let width = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        width |= view.getUint8(1 + i) << (i * 8);
+    let offset = 5;
+
+    function readVarint(fieldName) {
+        let value = 0;
+        let shift = 0;
+
+        for (let i = 0; i < 5; i++) {
+            if (offset >= bytes.length) {
+                throw new Error('.maze file is truncated while reading ' + fieldName);
+            }
+
+            const byte = bytes[offset++];
+            value += (byte & 0x7F) * (2 ** shift);
+            if ((byte & 0x80) === 0) {
+                if (!Number.isSafeInteger(value)) {
+                    throw new Error('.maze ' + fieldName + ' exceeds safe integer range');
+                }
+                return value;
+            }
+            shift += 7;
+        }
+
+        throw new Error('.maze ' + fieldName + ' varint is too large');
     }
 
-    let height = 0;
-    for (let i = 0; i < bytesPerDim; i++) {
-        height |= view.getUint8(1 + bytesPerDim + i) << (i * 8);
-    }
+    const width = readVarint('width');
+    const height = readVarint('height');
+    const startIndex = readVarint('start index');
+    const goalIndex = readVarint('goal index');
 
     if (width < 3 || height < 3 || width > 50000 || height > 50000) {
         throw new Error('.maze file has invalid dimensions: ' + width + 'x' + height);
     }
 
     const totalCells = width * height;
-    if (!Number.isFinite(totalCells) || totalCells <= 0) {
+    if (!Number.isSafeInteger(totalCells) || totalCells <= 0) {
         throw new Error('.maze file dimensions overflowed');
     }
-
-    const headerSize = 1 + bytesPerDim * 2;
-    const expectedSize = headerSize + Math.ceil(totalCells * 2 / 8);
-    if (arrayBuffer.byteLength < expectedSize) {
-        throw new Error('.maze file is truncated or corrupted');
+    if (startIndex < 0 || startIndex >= totalCells || goalIndex < 0 || goalIndex >= totalCells) {
+        throw new Error('.maze file has invalid start or goal index');
     }
 
-    const packed = new Uint8Array(arrayBuffer, headerSize);
+    const expectedMazeBytes = Math.ceil(totalCells / 8);
+    const expectedSize = offset + expectedMazeBytes;
+    if (bytes.length !== expectedSize) {
+        throw new Error('.maze file size does not match V2 payload length');
+    }
+
+    const packed = bytes.subarray(offset);
     const cells = new Uint8Array(totalCells);
 
-    let bitIndex = 0;
-    let startIndex = -1;
-    let goalIndex = -1;
-
     for (let i = 0; i < totalCells; i++) {
-        const byteIndex = bitIndex >> 3;
-        if (byteIndex >= packed.length) {
-            throw new Error('.maze file data is corrupted');
-        }
-
-        const offset = 6 - (bitIndex % 8);
-        const cell = (packed[byteIndex] >> offset) & 0b11;
-        bitIndex += 2;
-
-        cells[i] = cell;
-
-        if (cell === 2 && startIndex === -1) {
-            startIndex = i;
-        } else if (cell === 3 && goalIndex === -1) {
-            goalIndex = i;
-        }
+        const isWalkable = ((packed[i >> 3] >> (7 - (i & 7))) & 1) === 1;
+        cells[i] = isWalkable ? 1 : 0;
     }
 
-    if (startIndex === -1 || goalIndex === -1) {
-        throw new Error('Invalid .maze file: missing start or goal');
+    if (startIndex === goalIndex) {
+        throw new Error('.maze file start and goal cannot be the same cell');
     }
+    if (cells[startIndex] === 0 || cells[goalIndex] === 0) {
+        throw new Error('.maze file start and goal must be on walkable cells');
+    }
+
+    cells[startIndex] = 2;
+    cells[goalIndex] = 3;
 
     return {
         width,
