@@ -41,12 +41,24 @@ function updateProgress(current, total, status) {
     const safeTotal = total > 0 ? total : 1;
     const percent = Math.min(100, Math.max(0, (current / safeTotal) * 100));
     progressFill.style.width = percent + '%';
-    statusText.textContent = status;
+    if (typeof status === 'string') {
+        statusText.textContent = status;
+    }
 }
 
 function progressStep(total) {
     return Math.max(1, Math.floor(total / 100));
 }
+
+function nextFrame() {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const PROGRESS_TRANSITION_MS = 180;
 
 // Recursive Backtracker (DFS)
 async function recursiveBacktracker(maze, startX, startY, width, height) {
@@ -150,7 +162,11 @@ async function compactDFS(maze, startX, startY, width, height) {
 
         // Async UI throttle
         if (carvedCells - lastUpdate > 100) {
-            updateProgress(carvedCells, totalPotentialArea / 2);
+            updateProgress(
+                carvedCells,
+                totalPotentialArea,
+                `Carving dense maze: ${carvedCells.toLocaleString()} cells`
+            );
             lastUpdate = carvedCells;
             await new Promise(r => setTimeout(r, 0));
         }
@@ -835,7 +851,9 @@ generateBtn.addEventListener('click', async () => {
     maze[goalY * width + goalX] = G;
 
     updateProgress(100, 100, 'Rendering maze...');
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Let the browser paint and finish the width transition to 100%.
+    await nextFrame();
+    await wait(PROGRESS_TRANSITION_MS + 40);
     
     // Check if maze is too large to display on canvas
     const canvasLimit = 10000;  // More conservative limit
@@ -879,6 +897,11 @@ generateBtn.addEventListener('click', async () => {
     document.getElementById('pathLength').textContent = solvable ? `${pathLength} steps` : 'N/A';
 
     info.style.display = 'block';
+
+    updateProgress(100, 100, 'Complete');
+    // Keep 100% visible briefly before hiding progress UI.
+    await nextFrame();
+    await wait(80);
 
     progressContainer.style.display = 'none';
     generateBtn.disabled = false;
