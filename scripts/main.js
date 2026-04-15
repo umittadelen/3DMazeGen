@@ -1083,11 +1083,12 @@ function castRay(rayDirX, rayDirY) {
         sideDistY = (mapY + 1.0 - playerY) * deltaDistY;
     }
 
-    let hitType = 0;
+    let hitType = -1;
     let dist = 0;
     let hitX = playerX;
     let hitY = playerY;
     let hitSide = 0;
+    let didHit = false;
 
     // DDA algorithm - steps through grid cells
     for (let i = 0; i < MAX_DEPTH * 2; i++) {
@@ -1107,6 +1108,7 @@ function castRay(rayDirX, rayDirY) {
             hitType = 0;
             hitX = playerX + dirX * dist;
             hitY = playerY + dirY * dist;
+            didHit = true;
             break;
         }
 
@@ -1115,13 +1117,32 @@ function castRay(rayDirX, rayDirY) {
             hitType = 0;
             hitX = playerX + dirX * dist;
             hitY = playerY + dirY * dist;
+            didHit = true;
             break;
         } else if (cell === 3) {
             hitType = 3;
             hitX = playerX + dirX * dist;
             hitY = playerY + dirY * dist;
+            didHit = true;
             break;
         }
+    }
+
+    // If no wall/goal is hit within MAX_DEPTH, keep this as an "empty" ray.
+    if (!didHit) {
+        const fallbackDist = Math.max(MAX_DEPTH, 0.0001);
+        return {
+            dist: fallbackDist,
+            hitType: -1,
+            hitX: playerX + dirX * fallbackDist,
+            hitY: playerY + dirY * fallbackDist,
+            hitSide,
+            wallX: 0,
+            hitMapX: Math.floor(playerX + dirX * fallbackDist),
+            hitMapY: Math.floor(playerY + dirY * fallbackDist),
+            dirX,
+            dirY
+        };
     }
 
     // Use perpendicular hit distance math to stabilize texture sampling at grazing angles.
@@ -1264,6 +1285,10 @@ function render(collectRayData = false) {
         const rayDirY = dirY + planeY * cameraX;
         const result = castRay(rayDirX, rayDirY);
         if (rayData) rayData.push(result);
+
+        if (result.hitType < 0) {
+            continue;
+        }
 
         const wallHeight = planeDist / result.dist;
         const distanceRatio = clamp(result.dist / MAX_DEPTH, 0, 1);
