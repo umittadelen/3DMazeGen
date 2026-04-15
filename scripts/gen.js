@@ -18,6 +18,7 @@ let mazeHeight = 0;
 
 const algorithmDescriptions = {
     recursive: '<strong>Recursive Backtracker:</strong> Creates long, winding passages with few dead ends. Very popular and efficient.',
+    compactDFS: '<strong>Compact/Dense DFS:</strong> A variant of Recursive Backtracker that allows paths to hug each other, creating a more compact maze with fewer wide-open areas.',
     division: '<strong>Recursive Division:</strong> Creates mazes by recursively dividing the area with walls and adding passages. Results in a grid-like structure with many right angles.',
     prim: '<strong>Prim\'s Algorithm:</strong> Grows the maze from a single point, creating shorter passages with more branching.',
     kruskal: '<strong>Kruskal\'s Algorithm:</strong> Creates mazes by connecting separate trees, resulting in many short passages.',
@@ -37,10 +38,14 @@ algoSelect.addEventListener('change', () => {
 });
 
 function updateProgress(current, total, status) {
-    const percent = Math.floor((current / total) * 100);
+    const safeTotal = total > 0 ? total : 1;
+    const percent = Math.min(100, Math.max(0, (current / safeTotal) * 100));
     progressFill.style.width = percent + '%';
-    progressFill.textContent = percent + '%';
     statusText.textContent = status;
+}
+
+function progressStep(total) {
+    return Math.max(1, Math.floor(total / 100));
 }
 
 // Recursive Backtracker (DFS)
@@ -82,6 +87,90 @@ async function recursiveBacktracker(maze, startX, startY, width, height) {
             await new Promise(resolve => setTimeout(resolve, 0));
         }
     }
+}
+
+/**
+ * Generates a "Compact" or "Dense" maze.
+ * Unlike standard Recursive Backtrackers that use a grid-gap, 
+ * this uses Adjacency Constraints to allow paths to hug each other.
+ */
+async function compactDFS(maze, startX, startY, width, height) {
+    const stack = [[startX, startY]];
+    maze[startY * width + startX] = W;
+    
+    let carvedCells = 1;
+    let lastUpdate = 0;
+    const totalPotentialArea = width * height;
+
+    while (stack.length > 0) {
+        // Current 'head' of the path
+        const [x, y] = stack[stack.length - 1];
+        
+        const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+        // Randomize direction order (Fisher-Yates Shuffle)
+        for (let i = directions.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [directions[i], directions[j]] = [directions[j], directions[i]];
+        }
+
+        let carved = false;
+        for (const [dx, dy] of directions) {
+            const nx = x + dx;
+            const ny = y + dy;
+
+            // 1. Boundary Check: Ensure we aren't carving the outer-most border
+            if (nx > 0 && nx < width - 1 && ny > 0 && ny < height - 1) {
+                
+                // 2. Occupancy Check: Only consider uncarved space (Black/Wall)
+                if (maze[ny * width + nx] === B) {
+                    
+                    // 3. Adjacency Constraint: 
+                    // To ensure a single path with no loops, the target cell 
+                    // must have exactly ONE neighbor that is already a path.
+                    if (countPathNeighbors(maze, nx, ny, width) === 1) {
+                        
+                        // 4. Corner-Touch Constraint (Optional):
+                        // Prevents paths from touching even at diagonals for a cleaner look.
+                        if (countDiagonalNeighbors(maze, nx, ny, width) <= 1) {
+                            maze[ny * width + nx] = W;
+                            stack.push([nx, ny]);
+                            carvedCells++;
+                            carved = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If no directions were valid, backtrack
+        if (!carved) {
+            stack.pop();
+        }
+
+        // Async UI throttle
+        if (carvedCells - lastUpdate > 100) {
+            updateProgress(carvedCells, totalPotentialArea / 2);
+            lastUpdate = carvedCells;
+            await new Promise(r => setTimeout(r, 0));
+        }
+    }
+}
+function countPathNeighbors(maze, x, y, width) {
+    let count = 0;
+    if (maze[y * width + (x + 1)] === W) count++;
+    if (maze[y * width + (x - 1)] === W) count++;
+    if (maze[(y + 1) * width + x] === W) count++;
+    if (maze[(y - 1) * width + x] === W) count++;
+    return count;
+}
+function countDiagonalNeighbors(maze, x, y, width) {
+    let count = 0;
+    if (maze[(y - 1) * width + (x - 1)] === W) count++;
+    if (maze[(y - 1) * width + (x + 1)] === W) count++;
+    if (maze[(y + 1) * width + (x - 1)] === W) count++;
+    if (maze[(y + 1) * width + (x + 1)] === W) count++;
+    return count;
 }
 
 // Prim's Algorithm
@@ -163,6 +252,8 @@ async function kruskalsAlgorithm(maze, width, height) {
     };
 
     let processed = 0;
+    let lastUpdate = 0;
+    const updateEvery = progressStep(walls.length);
     for (const [x1, y1, x2, y2] of walls) {
         const cell1 = y1 * width + x1;
         const cell2 = y2 * width + x2;
@@ -172,8 +263,9 @@ async function kruskalsAlgorithm(maze, width, height) {
         }
 
         processed++;
-        if (processed % 1000 === 0) {
+        if (processed - lastUpdate >= updateEvery) {
             updateProgress(processed, walls.length, `Connecting regions: ${processed.toLocaleString()}`);
+            lastUpdate = processed;
             await new Promise(resolve => setTimeout(resolve, 0));
         }
     }
@@ -194,6 +286,8 @@ async function wilsonsAlgorithm(maze, width, height) {
     inMaze.add(start[1] * width + start[0]);
 
     const totalCells = cells.length;
+    const updateEvery = progressStep(totalCells);
+    let lastUpdate = 0;
 
     while (inMaze.size < totalCells) {
         let current = cells[Math.floor(Math.random() * cells.length)];
@@ -232,8 +326,9 @@ async function wilsonsAlgorithm(maze, width, height) {
             }
         }
 
-        if (inMaze.size % 100 === 0) {
+        if (inMaze.size - lastUpdate >= updateEvery) {
             updateProgress(inMaze.size, totalCells, `Random walks: ${inMaze.size.toLocaleString()} cells`);
+            lastUpdate = inMaze.size;
             await new Promise(resolve => setTimeout(resolve, 0));
         }
     }
@@ -247,7 +342,8 @@ async function aldousBroder(maze, startX, startY, width, height) {
 
     const totalCells = Math.floor(width / 2) * Math.floor(height / 2);
     let visitedCells = 1;
-    let steps = 0;
+    let lastUpdate = 0;
+    const updateEvery = progressStep(totalCells);
 
     while (visitedCells < totalCells) {
         const dirs = [[0, 2], [0, -2], [2, 0], [-2, 0]];
@@ -265,9 +361,9 @@ async function aldousBroder(maze, startX, startY, width, height) {
             y = ny;
         }
 
-        steps++;
-        if (steps % 10000 === 0) {
+        if (visitedCells - lastUpdate >= updateEvery) {
             updateProgress(visitedCells, totalCells, `Random walk: ${visitedCells.toLocaleString()} cells`);
+            lastUpdate = visitedCells;
             await new Promise(resolve => setTimeout(resolve, 0));
         }
     }
@@ -277,6 +373,8 @@ async function aldousBroder(maze, startX, startY, width, height) {
 async function binaryTree(maze, width, height) {
     const totalCells = Math.floor(width / 2) * Math.floor(height / 2);
     let carved = 0;
+    let lastUpdate = 0;
+    const updateEvery = progressStep(totalCells);
 
     for (let y = 1; y < height - 1; y += 2) {
         for (let x = 1; x < width - 1; x += 2) {
@@ -292,8 +390,9 @@ async function binaryTree(maze, width, height) {
             }
 
             carved++;
-            if (carved % 1000 === 0) {
+            if (carved - lastUpdate >= updateEvery) {
                 updateProgress(carved, totalCells, `Carving binary tree: ${carved.toLocaleString()}`);
+                lastUpdate = carved;
                 await new Promise(resolve => setTimeout(resolve, 0));
             }
         }
@@ -302,6 +401,9 @@ async function binaryTree(maze, width, height) {
 
 // Sidewinder Algorithm
 async function sidewinder(maze, width, height) {
+    const totalRows = Math.floor((height - 1) / 2);
+    let processedRows = 0;
+
     for (let y = 1; y < height - 1; y += 2) {
         let run = [];
         for (let x = 1; x < width - 1; x += 2) {
@@ -320,7 +422,8 @@ async function sidewinder(maze, width, height) {
                 maze[y * width + x + 1] = W; // carve east
             }
         }
-        updateProgress(y, height, `Carving row ${y}/${height}`);
+        processedRows++;
+        updateProgress(processedRows, totalRows, `Carving row ${processedRows}/${totalRows}`);
         await new Promise(r => setTimeout(r, 0));
     }
 }
@@ -334,6 +437,8 @@ async function huntAndKill(maze, width, height) {
     const dirs = [[0, 2], [0, -2], [2, 0], [-2, 0]];
     const totalCells = Math.floor(width / 2) * Math.floor(height / 2);
     let visited = 1;
+    let lastUpdate = 0;
+    const updateEvery = progressStep(totalCells);
 
     while (visited < totalCells) {
         // random walk
@@ -371,8 +476,9 @@ async function huntAndKill(maze, width, height) {
                 }
             }
         }
-        if (visited % 100 === 0) {
+        if (visited - lastUpdate >= updateEvery) {
             updateProgress(visited, totalCells, `Hunting: ${visited.toLocaleString()} cells`);
+            lastUpdate = visited;
             await new Promise(r => setTimeout(r, 0));
         }
     }
@@ -385,6 +491,8 @@ async function growingTree(maze, startX, startY, width, height, selection = 'las
     const dirs = [[0, 2], [0, -2], [2, 0], [-2, 0]];
     const total = Math.floor(width / 2) * Math.floor(height / 2);
     let visited = 1;
+    let lastUpdate = 0;
+    const updateEvery = progressStep(total);
 
     while (cells.length > 0) {
         let index;
@@ -409,8 +517,9 @@ async function growingTree(maze, startX, startY, width, height, selection = 'las
         }
         if (!carved) cells.splice(index, 1);
 
-        if (visited % 100 === 0) {
+        if (visited - lastUpdate >= updateEvery) {
             updateProgress(visited, total, `Growing: ${visited.toLocaleString()} cells`);
+            lastUpdate = visited;
             await new Promise(r => setTimeout(r, 0));
         }
     }
@@ -668,6 +777,9 @@ generateBtn.addEventListener('click', async () => {
         case 'recursive':
             await recursiveBacktracker(maze, startX, startY, width, height);
             break;
+        case 'compactDFS':
+            await compactDFS(maze, startX, startY, width, height);
+            break;
         case 'prim':
             await primsAlgorithm(maze, startX, startY, width, height);
             break;
@@ -709,7 +821,10 @@ generateBtn.addEventListener('click', async () => {
             await growingTree(maze, startX, startY, width, height, 'mix');
             break;
         case 'division':
-            await divisionMaze(maze, width, height);
+            await divisionMaze(maze, width, height, (progress) => {
+                const percent = Math.floor(progress * 100);
+                updateProgress(percent, 100, `Dividing space: ${percent}%`);
+            });
             startX = 1;
             startY = 1;
             break;

@@ -100,24 +100,61 @@
         }
 
         .progress-bar {
-            background: rgba(20, 20, 20, 0.9);
-            height: 30px;
-            border-radius: 4px;
+            background: linear-gradient(to bottom, #f7f7f7 0%, #e5e5e5 48%, #d6d6d6 100%);
+            height: 24px;
+            border-radius: 3px;
             overflow: hidden;
             margin: 10px 0;
-            border: 1px solid #444;
+            border: 1px solid #7f9db9;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
         }
 
         .progress-fill {
             height: 100%;
-            background: linear-gradient(90deg, #0f3460, #1a1a2e);
-            transition: width 0.1s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: bold;
-            font-size: 12px;
+            width: 0%;
+            background: linear-gradient(to bottom, #b7f18c 0%, #82db47 45%, #5dbb2a 46%, #68c631 100%);
+            transition: width 0.18s linear;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .progress-fill::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 190px;
+            height: 100%;
+            background: linear-gradient(to right,
+                    rgba(255, 255, 255, 0) 0%,
+                rgba(255, 255, 255, 0.18) 28%,
+                rgba(255, 255, 255, 0.33) 50%,
+                rgba(255, 255, 255, 0.18) 72%,
+                    rgba(255, 255, 255, 0) 100%);
+            transform: translate3d(-160px, 0, 0) skewX(-18deg);
+            will-change: transform;
+            animation: win7ProgressShine 2.35s cubic-bezier(0.28, 0, 0.22, 1) infinite;
+        }
+
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 48%;
+            background: linear-gradient(to bottom, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.08));
+        }
+
+        @keyframes win7ProgressShine {
+            0% {
+                transform: translate3d(-160px, 0, 0) skewX(-18deg);
+            }
+
+            100% {
+                transform: translate3d(760px, 0, 0) skewX(-18deg);
+            }
         }
 
         .status {
@@ -176,6 +213,7 @@
             Algorithm:
             <select id="algorithm">
                 <option value="recursive">Recursive Backtracker</option>
+                <option value="compactDFS">Compact/Dense DFS</option>
                 <option value="division">Recursive Division</option>
                 <option value="prim">Prim's Algorithm</option>
                 <option value="kruskal">Kruskal's Algorithm</option>
@@ -211,7 +249,7 @@
     <div class="progress" id="progressContainer" style="display: none;">
         <div class="status" id="statusText">Initializing...</div>
         <div class="progress-bar">
-            <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+            <div class="progress-fill" id="progressFill" style="width: 0%"></div>
         </div>
     </div>
 
