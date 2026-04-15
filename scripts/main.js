@@ -129,7 +129,11 @@ let fpsFrameCounter = 0;
 let fpsSampleStart = performance.now();
 
 let playerPitch = 0;
+let targetPlayerPitch = 0;
 const MAX_PITCH = Math.PI / 2 * 0.99;
+const MOUSE_PITCH_SENSITIVITY = 0.004;
+const MOUSE_PITCH_DEADZONE = 0.35;
+const PITCH_SMOOTHING = 0.35;
 
 const DEFAULT_FOV_DEGREES = 80;
 const MIN_FOV_DEGREES = 45;
@@ -137,6 +141,8 @@ const MAX_FOV_DEGREES = 100;
 const DEFAULT_SUPER_SAMPLE_SCALE = 1;
 const MIN_SUPER_SAMPLE_SCALE = 0.25;
 const MAX_SUPER_SAMPLE_SCALE = 4;
+const MAX_INTERNAL_RENDER_PIXELS = 50000000;
+const MAX_RAYCAST_WIDTH = 2400;
 const SETTINGS_STORAGE_KEY = 'mazeRenderSettings';
 
 let fovDegrees = DEFAULT_FOV_DEGREES;
@@ -167,10 +173,12 @@ const WALL_LIGHT_DIR_Y = -0.62;
 const DIRECTIONAL_FACE_SHADOW_STRENGTH = 0.16;
 const MOVE_SPEED = 0.025;
 const ROT_SPEED = 0.025;
+const PLAYER_COLLISION_RADIUS = 0.2;
 const BASE_FRAME_SECONDS = 1 / 60;
 const MAX_DELTA_SECONDS = 0.1;
 let superSampleScale = DEFAULT_SUPER_SAMPLE_SCALE;
-const MAX_SUPERSAMPLE_PIXELS = 50000000;
+let effectiveSuperSampleScale = DEFAULT_SUPER_SAMPLE_SCALE;
+let effectiveNativeSuperSampleScale = DEFAULT_SUPER_SAMPLE_SCALE;
 
 const keys = {};
 let mouseLocked = false;
@@ -180,10 +188,16 @@ let lastFrameTimestamp = null;
 let backgroundGradientCacheKey = '';
 let cachedSkyGradient = null;
 let cachedGroundGradient = null;
+const scratchRayResult = {};
+const minimapRayBuffer = [];
 
 let mazeWorker = null;
 let mazeWorkerRequestId = 0;
 const mazeWorkerPending = new Map();
+let textureWorker = null;
+let textureWorkerRequestId = 0;
+const textureWorkerPending = new Map();
+let textureAtlasBuildGeneration = 0;
 
 function initMazeWorker() {
     if (typeof Worker === 'undefined') return;
@@ -217,6 +231,44 @@ function initMazeWorker() {
     } catch (err) {
         console.warn('Maze worker disabled:', err);
         mazeWorker = null;
+    }
+}
+
+function initTextureWorker() {
+    if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap !== 'function') {
+        return;
+    }
+
+    try {
+        textureWorker = new Worker('scripts/textureWorker.js');
+
+        textureWorker.addEventListener('message', (event) => {
+            const { id, ok, result, error } = event.data || {};
+            const pending = textureWorkerPending.get(id);
+            if (!pending) return;
+
+            textureWorkerPending.delete(id);
+            clearTimeout(pending.timeoutId);
+
+            if (ok) {
+                pending.resolve(result);
+            } else {
+                pending.reject(new Error(error || 'Texture worker failed'));
+            }
+        });
+
+        textureWorker.addEventListener('error', (event) => {
+            const err = new Error(event.message || 'Texture worker crashed');
+            textureWorkerPending.forEach((pending) => {
+                clearTimeout(pending.timeoutId);
+                pending.reject(err);
+            });
+            textureWorkerPending.clear();
+            textureWorker = null;
+        });
+    } catch (err) {
+        console.warn('Texture worker disabled:', err);
+        textureWorker = null;
     }
 }
 
@@ -331,18 +383,55 @@ function parseMazeFormatWithWorker(arrayBuffer) {
 }
 
 initMazeWorker();
+initTextureWorker();
 
 const wallTextures = [];
 let wallTexturesReady = false;
 const textureNames = ['bricks.png', 'bricks1.png', 'bricks2.png'];
 const WALL_TEXTURE_REPEAT = 7; // Set to 4 for 4x4 tiling
-const WALL_ATLAS_VARIANTS = 24;
+const WALL_ATLAS_VARIANTS = 32;
 let pendingTextureLoads = textureNames.length;
 let mazeTextureSeed = 2166136261 >>> 0;
 const wallTextureAtlases = [];
 
 function clearWallTextureAtlasCache() {
+    for (const atlas of wallTextureAtlases) {
+        if (atlas && typeof atlas.close === 'function') {
+            atlas.close();
+        }
+    }
     wallTextureAtlases.length = 0;
+}
+
+function buildTextureAtlasesWithWorker(sourceBitmaps) {
+    if (!textureWorker) {
+        return Promise.reject(new Error('Texture worker unavailable'));
+    }
+
+    return new Promise((resolve, reject) => {
+        const id = ++textureWorkerRequestId;
+        const timeoutId = setTimeout(() => {
+            textureWorkerPending.delete(id);
+            reject(new Error('Texture atlas build timed out'));
+        }, 15000);
+
+        textureWorkerPending.set(id, { resolve, reject, timeoutId });
+
+        try {
+            textureWorker.postMessage({
+                id,
+                type: 'buildTextureAtlases',
+                textures: sourceBitmaps,
+                atlasVariants: WALL_ATLAS_VARIANTS,
+                textureRepeat: WALL_TEXTURE_REPEAT,
+                mazeTextureSeed
+            }, sourceBitmaps);
+        } catch (err) {
+            clearTimeout(timeoutId);
+            textureWorkerPending.delete(id);
+            reject(err);
+        }
+    });
 }
 
 function createRandomizedCellAtlas(variantIndex) {
@@ -385,15 +474,45 @@ function createRandomizedCellAtlas(variantIndex) {
 }
 
 function rebuildWallTextureAtlases() {
+    const buildGeneration = ++textureAtlasBuildGeneration;
     clearWallTextureAtlasCache();
     if (!wallTexturesReady || wallTextures.length === 0) return;
 
-    for (let i = 0; i < WALL_ATLAS_VARIANTS; i++) {
-        const atlas = createRandomizedCellAtlas(i);
-        if (atlas) {
-            wallTextureAtlases.push(atlas);
+    const buildOnMainThread = () => {
+        if (buildGeneration !== textureAtlasBuildGeneration) return;
+        clearWallTextureAtlasCache();
+        for (let i = 0; i < WALL_ATLAS_VARIANTS; i++) {
+            const atlas = createRandomizedCellAtlas(i);
+            if (atlas) {
+                wallTextureAtlases.push(atlas);
+            }
         }
+        needsRender = true;
+    };
+
+    if (!textureWorker || typeof createImageBitmap !== 'function') {
+        buildOnMainThread();
+        return;
     }
+
+    Promise.all(wallTextures.map((texture) => createImageBitmap(texture)))
+        .then((sourceBitmaps) => buildTextureAtlasesWithWorker(sourceBitmaps))
+        .then((result) => {
+            if (buildGeneration !== textureAtlasBuildGeneration) {
+                (result.atlases || []).forEach((atlas) => atlas && typeof atlas.close === 'function' && atlas.close());
+                return;
+            }
+
+            clearWallTextureAtlasCache();
+            for (const atlas of (result.atlases || [])) {
+                wallTextureAtlases.push(atlas);
+            }
+            needsRender = true;
+        })
+        .catch((err) => {
+            console.warn('Texture worker fallback:', err);
+            buildOnMainThread();
+        });
 }
 
 textureNames.forEach((name) => {
@@ -466,16 +585,15 @@ function getTextureForCell(cellX, cellY) {
 }
 
 function updateRayCount(targetWidth) {
-    // Keep one ray per internal render pixel so supersampling scales ray density exactly with render resolution.
-    NUM_RAYS = Math.max(1, Math.floor(targetWidth));
+    // Cap ray density so high-DPI / high-refresh displays do not generate excessive per-frame work.
+    NUM_RAYS = clamp(Math.floor(targetWidth), 320, MAX_RAYCAST_WIDTH);
 }
 
 function updateDebugOverlay() {
     if (!debugVisible) return;
 
-    const superSampleFactor = screenWidth > 0
-        ? (renderWidth / screenWidth).toFixed(2)
-        : '1.00';
+    const viewportSuperSampleFactor = effectiveSuperSampleScale.toFixed(2);
+    const nativeSuperSampleFactor = effectiveNativeSuperSampleScale.toFixed(2);
     const mazeStatus = maze
         ? `${mazeWidth}x${mazeHeight}`
         : 'not loaded';
@@ -483,7 +601,7 @@ function updateDebugOverlay() {
     debugOverlay.textContent = [
         `FPS: ${fpsValue.toFixed(1)} | Frame: ${frameTimeMs.toFixed(2)} ms`,
         `Screen: ${screenWidth}x${screenHeight}`,
-        `Render: ${renderWidth}x${renderHeight} (${superSampleFactor}x)`,
+        `Render: ${renderWidth}x${renderHeight} (${viewportSuperSampleFactor}x viewport | ${nativeSuperSampleFactor}x native)`,
         `Rays: ${NUM_RAYS}`,
         `Player: x=${playerX.toFixed(2)} y=${playerY.toFixed(2)}`,
         `Angle: ${playerAngle.toFixed(3)} | Pitch: ${playerPitch.toFixed(3)}`,
@@ -529,7 +647,13 @@ function loadRenderSettings() {
 
 function syncRenderSettingsUi() {
     if (superSampleScaleInput) superSampleScaleInput.value = superSampleScale.toFixed(2);
-    if (superSampleScaleValue) superSampleScaleValue.textContent = `${superSampleScale.toFixed(2)}x`;
+    if (superSampleScaleValue) {
+        const isCapped = effectiveSuperSampleScale + 0.01 < superSampleScale;
+        superSampleScaleValue.textContent = isCapped
+            ? `${effectiveSuperSampleScale.toFixed(2)}x capped`
+            : `${superSampleScale.toFixed(2)}x`;
+        superSampleScaleValue.title = `Requested ${superSampleScale.toFixed(2)}x, applying ${effectiveSuperSampleScale.toFixed(2)}x`;
+    }
     if (fovInput) fovInput.value = String(Math.round(fovDegrees));
     if (fovValue) fovValue.textContent = `${Math.round(fovDegrees)}°`;
 }
@@ -570,7 +694,6 @@ function toggleDebugOverlay() {
 
 function presentFrame() {
     displayCtx.setTransform(1, 0, 0, 1, 0, 0);
-    displayCtx.clearRect(0, 0, screenWidth, screenHeight);
     displayCtx.drawImage(renderCanvas, 0, 0, renderWidth, renderHeight, 0, 0, screenWidth, screenHeight);
 }
 
@@ -601,12 +724,16 @@ function resizeCanvas() {
     screenWidth = Math.floor(cssWidth * dpr);
     screenHeight = Math.floor(cssHeight * dpr);
 
-    const screenPixels = Math.max(1, screenWidth * screenHeight);
-    const maxScaleByPixels = Math.sqrt(MAX_SUPERSAMPLE_PIXELS / screenPixels);
+    const baseRenderWidth = Math.max(1, Math.floor(cssWidth));
+    const baseRenderHeight = Math.max(1, Math.floor(cssHeight));
+    const renderPixels = Math.max(1, baseRenderWidth * baseRenderHeight);
+    const maxScaleByPixels = Math.sqrt(MAX_INTERNAL_RENDER_PIXELS / renderPixels);
     const internalScale = Math.max(MIN_SUPER_SAMPLE_SCALE, Math.min(superSampleScale, maxScaleByPixels));
 
-    renderWidth = Math.max(1, Math.floor(screenWidth * internalScale));
-    renderHeight = Math.max(1, Math.floor(screenHeight * internalScale));
+    effectiveSuperSampleScale = internalScale;
+    renderWidth = Math.max(1, Math.floor(baseRenderWidth * internalScale));
+    renderHeight = Math.max(1, Math.floor(baseRenderHeight * internalScale));
+    effectiveNativeSuperSampleScale = screenWidth > 0 ? (renderWidth / screenWidth) : 1;
 
     updateRayCount(renderWidth);
 
@@ -631,6 +758,7 @@ function resizeCanvas() {
     displayCtx.imageSmoothingQuality = 'high';
     renderCtx.imageSmoothingEnabled = false;
     minimapCtx.imageSmoothingEnabled = false;
+    syncRenderSettingsUi();
     needsRender = true;
     updateDebugOverlay();
 }
@@ -868,6 +996,7 @@ function loadMaze(img) {
     won = false;
     playerAngle = getInitialPlayerAngle();
     playerPitch = 0;
+    targetPlayerPitch = 0;
     needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
     gameLoopId = requestAnimationFrame(gameLoop);
@@ -906,6 +1035,7 @@ async function loadMazeFormat(arrayBuffer) {
     won = false;
     playerAngle = getInitialPlayerAngle();
     playerPitch = 0;
+    targetPlayerPitch = 0;
     needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
     gameLoopId = requestAnimationFrame(gameLoop);
@@ -917,6 +1047,33 @@ function isWall(x, y) {
     const iy = Math.floor(y);
     if (ix < 0 || ix >= mazeWidth || iy < 0 || iy >= mazeHeight) return true;
     return maze[iy * mazeWidth + ix] === 0;
+}
+
+function canOccupyPosition(x, y, radius = PLAYER_COLLISION_RADIUS) {
+    const minCellX = Math.floor(x - radius);
+    const maxCellX = Math.floor(x + radius);
+    const minCellY = Math.floor(y - radius);
+    const maxCellY = Math.floor(y + radius);
+    const radiusSq = radius * radius;
+
+    for (let cellY = minCellY; cellY <= maxCellY; cellY++) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX++) {
+            if (!isWall(cellX + 0.5, cellY + 0.5)) {
+                continue;
+            }
+
+            const nearestX = clamp(x, cellX, cellX + 1);
+            const nearestY = clamp(y, cellY, cellY + 1);
+            const dx = x - nearestX;
+            const dy = y - nearestY;
+
+            if ((dx * dx) + (dy * dy) < radiusSq) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 function isWalkableCell(cellX, cellY) {
@@ -1030,6 +1187,7 @@ function goBack() {
     playerY = 0;
     playerAngle = 0;
     playerPitch = 0;
+    targetPlayerPitch = 0;
     goalX = 0;
     goalY = 0;
     
@@ -1054,7 +1212,7 @@ function goBack() {
 }
 
 // OPTIMIZED: DDA ray casting algorithm
-function castRay(rayDirX, rayDirY) {
+function castRay(rayDirX, rayDirY, out = {}) {
     const dirX = rayDirX;
     const dirY = rayDirY;
 
@@ -1131,18 +1289,17 @@ function castRay(rayDirX, rayDirY) {
     // If no wall/goal is hit within MAX_DEPTH, keep this as an "empty" ray.
     if (!didHit) {
         const fallbackDist = Math.max(MAX_DEPTH, 0.0001);
-        return {
-            dist: fallbackDist,
-            hitType: -1,
-            hitX: playerX + dirX * fallbackDist,
-            hitY: playerY + dirY * fallbackDist,
-            hitSide,
-            wallX: 0,
-            hitMapX: Math.floor(playerX + dirX * fallbackDist),
-            hitMapY: Math.floor(playerY + dirY * fallbackDist),
-            dirX,
-            dirY
-        };
+        out.dist = fallbackDist;
+        out.hitType = -1;
+        out.hitX = playerX + dirX * fallbackDist;
+        out.hitY = playerY + dirY * fallbackDist;
+        out.hitSide = hitSide;
+        out.wallX = 0;
+        out.hitMapX = Math.floor(playerX + dirX * fallbackDist);
+        out.hitMapY = Math.floor(playerY + dirY * fallbackDist);
+        out.dirX = dirX;
+        out.dirY = dirY;
+        return out;
     }
 
     // Use perpendicular hit distance math to stabilize texture sampling at grazing angles.
@@ -1167,18 +1324,17 @@ function castRay(rayDirX, rayDirY) {
     if (wallX < 0) wallX += 1;
     if (wallX >= 1) wallX -= 1;
 
-    return {
-        dist: Math.max(perpDist, 0.0001),
-        hitType,
-        hitX,
-        hitY,
-        hitSide,
-        wallX,
-        hitMapX: mapX,
-        hitMapY: mapY,
-        dirX,
-        dirY
-    };
+    out.dist = Math.max(perpDist, 0.0001);
+    out.hitType = hitType;
+    out.hitX = hitX;
+    out.hitY = hitY;
+    out.hitSide = hitSide;
+    out.wallX = wallX;
+    out.hitMapX = mapX;
+    out.hitMapY = mapY;
+    out.dirX = dirX;
+    out.dirY = dirY;
+    return out;
 }
 
 function renderWallSlice(result, x, y, stripWidth, wallHeight, fog, distanceShadow) {
@@ -1222,18 +1378,24 @@ function renderWallSlice(result, x, y, stripWidth, wallHeight, fog, distanceShad
             if (FOG_IS_BLACK) {
                 const darkenAlpha = 1 - ((1 - gammaShadow) * (1 - fogBlend));
                 if (darkenAlpha > 0) {
-                    renderCtx.fillStyle = `rgba(0, 0, 0, ${darkenAlpha})`;
+                    renderCtx.fillStyle = '#000';
+                    renderCtx.globalAlpha = darkenAlpha;
                     renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                    renderCtx.globalAlpha = 1;
                 }
             } else {
                 if (gammaShadow > 0) {
-                    renderCtx.fillStyle = `rgba(0, 0, 0, ${gammaShadow})`;
+                    renderCtx.fillStyle = '#000';
+                    renderCtx.globalAlpha = gammaShadow;
                     renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                    renderCtx.globalAlpha = 1;
                 }
 
                 if (fogBlend > 0) {
-                    renderCtx.fillStyle = `rgba(${FOG_COLOR.r}, ${FOG_COLOR.g}, ${FOG_COLOR.b}, ${fogBlend})`;
+                    renderCtx.fillStyle = `rgb(${FOG_COLOR.r}, ${FOG_COLOR.g}, ${FOG_COLOR.b})`;
+                    renderCtx.globalAlpha = fogBlend;
                     renderCtx.fillRect(x, y, stripWidth, wallHeight);
+                    renderCtx.globalAlpha = 1;
                 }
             }
             return;
@@ -1272,7 +1434,8 @@ function render(collectRayData = false) {
     renderCtx.fillRect(0, centerY, renderWidth, renderHeight - centerY);
 
     // Cast rays
-    const rayData = collectRayData ? [] : null;
+    const rayData = collectRayData ? minimapRayBuffer : null;
+    if (rayData) rayData.length = NUM_RAYS;
     const dirX = Math.cos(playerAngle);
     const dirY = Math.sin(playerAngle);
     const planeScale = Math.tan(FOV / 2);
@@ -1283,8 +1446,11 @@ function render(collectRayData = false) {
         const cameraX = (2 * (i + 0.5)) / NUM_RAYS - 1;
         const rayDirX = dirX + planeX * cameraX;
         const rayDirY = dirY + planeY * cameraX;
-        const result = castRay(rayDirX, rayDirY);
-        if (rayData) rayData.push(result);
+        const result = castRay(
+            rayDirX,
+            rayDirY,
+            rayData ? (rayData[i] || (rayData[i] = {})) : scratchRayResult
+        );
 
         if (result.hitType < 0) {
             continue;
@@ -1298,8 +1464,8 @@ function render(collectRayData = false) {
         const x = Math.floor((i * renderWidth) / NUM_RAYS);
         const nextX = Math.floor(((i + 1) * renderWidth) / NUM_RAYS);
         const stripWidth = Math.max(1, nextX - x);
-        const y = Math.round(centerY - wallHeight / 2);
-        renderWallSlice(result, x, y, stripWidth, Math.ceil(wallHeight), fog, distanceShadow);
+        const y = centerY - wallHeight / 2;
+        renderWallSlice(result, x, y, stripWidth, wallHeight + 1, fog, distanceShadow);
     }
 
     return rayData;
@@ -1437,6 +1603,14 @@ function update(deltaSeconds = BASE_FRAME_SECONDS) {
     }
 
     const rotationStep = ROT_SPEED * frameScale;
+    const pitchLerpFactor = Math.min(1, PITCH_SMOOTHING * frameScale);
+    if (Math.abs(targetPlayerPitch - playerPitch) > 0.0001) {
+        playerPitch += (targetPlayerPitch - playerPitch) * pitchLerpFactor;
+        if (Math.abs(targetPlayerPitch - playerPitch) < 0.0001) {
+            playerPitch = targetPlayerPitch;
+        }
+        movedOrRotated = true;
+    }
 
     if (keys['ArrowLeft']) {
         playerAngle -= rotationStep;
@@ -1447,19 +1621,24 @@ function update(deltaSeconds = BASE_FRAME_SECONDS) {
         movedOrRotated = true;
     }
 
-    const buffer = 0.2;
     const newX = playerX + moveX;
     const newY = playerY + moveY;
 
     let actuallyMoved = false;
 
-    if (!isWall(newX + (moveX > 0 ? buffer : -buffer), playerY)) {
+    if (canOccupyPosition(newX, newY)) {
         playerX = newX;
-        actuallyMoved = true;
-    }
-    if (!isWall(playerX, newY + (moveY > 0 ? buffer : -buffer))) {
         playerY = newY;
-        actuallyMoved = true;
+        actuallyMoved = moveMagnitude > 0;
+    } else {
+        if (moveX !== 0 && canOccupyPosition(newX, playerY)) {
+            playerX = newX;
+            actuallyMoved = true;
+        }
+        if (moveY !== 0 && canOccupyPosition(playerX, newY)) {
+            playerY = newY;
+            actuallyMoved = true;
+        }
     }
 
     movedOrRotated = movedOrRotated || actuallyMoved;
@@ -1563,9 +1742,15 @@ document.addEventListener('mousemove', (e) => {
     // Only process mouse movement if pointer lock is active AND we're not exiting
     if (mouseLocked && document.pointerLockElement === canvas && !ignoreMouseMovement) {
         playerAngle += e.movementX * 0.002;
-        playerPitch -= e.movementY * 0.004;
-        if (playerPitch > MAX_PITCH) playerPitch = MAX_PITCH;
-        if (playerPitch < -MAX_PITCH) playerPitch = -MAX_PITCH;
+
+        if (Math.abs(e.movementY) >= MOUSE_PITCH_DEADZONE) {
+            targetPlayerPitch = clamp(
+                targetPlayerPitch - e.movementY * MOUSE_PITCH_SENSITIVITY,
+                -MAX_PITCH,
+                MAX_PITCH
+            );
+        }
+
         needsRender = true;
     }
 });

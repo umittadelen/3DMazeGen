@@ -1,10 +1,12 @@
-const CACHE_NAME = "mazegen-v4.5";
+const CACHE_NAME = "mazegen-v4.6";
 
 const FILES_TO_CACHE = [
   "index.html",
   "gen.html",
   "scripts/main.js",
   "scripts/gen.js",
+  "scripts/mazeWorker.js",
+  "scripts/textureWorker.js",
   "resources/icons/icon-60.png",
   "resources/icons/icon-76.png",
   "resources/icons/icon-120.png",
