@@ -63,6 +63,7 @@
             width: 100vw;
             height: 100vh;
             overflow: hidden;
+            touch-action: manipulation;
         }
 
         #canvas {
@@ -76,6 +77,9 @@
             image-rendering: crisp-edges;
             z-index: 0;
             display: block;
+            touch-action: none;
+            transform: none;
+            transform-origin: top left;
         }
 
         #controls {

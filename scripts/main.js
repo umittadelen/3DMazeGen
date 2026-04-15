@@ -17,12 +17,28 @@ let screenHeight = window.innerHeight;
 let renderWidth = window.innerWidth;
 let renderHeight = window.innerHeight;
 
+function getViewportSize() {
+    // visualViewport is more reliable on mobile during orientation changes.
+    if (window.visualViewport) {
+        return {
+            width: Math.max(1, window.visualViewport.width),
+            height: Math.max(1, window.visualViewport.height)
+        };
+    }
+
+    return {
+        width: Math.max(1, window.innerWidth),
+        height: Math.max(1, window.innerHeight)
+    };
+}
+
 // ---- ORIENTATION LOCK ----
 function checkOrientation() {
     const warning = document.getElementById('portrait-warning');
     const container = document.getElementById('container');
+    const viewport = getViewportSize();
     
-    if (window.innerHeight > window.innerWidth) {
+    if (viewport.height > viewport.width) {
         // Portrait mode
         warning.classList.add('show');
         container.style.display = 'none';
@@ -31,6 +47,21 @@ function checkOrientation() {
         warning.classList.remove('show');
         container.style.display = 'block';
     }
+}
+
+let orientationLayoutUpdateToken = null;
+
+function scheduleOrientationLayoutUpdate() {
+    if (orientationLayoutUpdateToken !== null) {
+        clearTimeout(orientationLayoutUpdateToken);
+    }
+
+    // Some mobile browsers report transient viewport values right after rotation.
+    orientationLayoutUpdateToken = setTimeout(() => {
+        orientationLayoutUpdateToken = null;
+        checkOrientation();
+        resizeCanvas();
+    }, 140);
 }
 
 window.addEventListener('orientationchange', checkOrientation);
@@ -563,8 +594,9 @@ function updateBackgroundGradients(centerY) {
 
 function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
-    const cssWidth = window.innerWidth;
-    const cssHeight = window.innerHeight;
+    const viewport = getViewportSize();
+    const cssWidth = viewport.width;
+    const cssHeight = viewport.height;
 
     screenWidth = Math.floor(cssWidth * dpr);
     screenHeight = Math.floor(cssHeight * dpr);
@@ -580,6 +612,8 @@ function resizeCanvas() {
 
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
+    canvas.style.transform = 'none';
+    canvas.style.transformOrigin = 'top left';
     canvas.width = screenWidth;
     canvas.height = screenHeight;
 
@@ -603,6 +637,10 @@ function resizeCanvas() {
 
 initLoadScreenSettings();
 window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', scheduleOrientationLayoutUpdate);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', scheduleOrientationLayoutUpdate);
+}
 resizeCanvas();
 
 function hideControls() {
@@ -612,6 +650,7 @@ function hideControls() {
 }
 
 function showError(message) {
+    info.style.display = 'block';
     info.innerHTML = `<span class="error">Error: ${message}</span>`;
     setTimeout(() => {
         info.innerHTML = 'Load a maze image to start. Use WASD or Arrow keys to move, Mouse to look around.';
@@ -655,8 +694,8 @@ upload.addEventListener('change', (e) => {
             const img = new Image();
             img.onload = () => {
                 try {
-                    loadMaze(img);
-                    hideControls();
+                    const loaded = loadMaze(img);
+                    if (loaded) hideControls();
                 } catch (err) {
                     console.error('Image load error:', err);
                     showError('Failed to load image: ' + err.message);
@@ -735,8 +774,13 @@ async function loadFromUrl(url) {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-        loadMaze(img);
-        hideControls();
+        try {
+            const loaded = loadMaze(img);
+            if (loaded) hideControls();
+        } catch (err) {
+            console.error('Image load error:', err);
+            showError('Failed to load image: ' + err.message);
+        }
     };
     img.onerror = () => showError('Failed to load image from URL. Check CORS or URL validity.');
     img.src = url;
@@ -810,8 +854,11 @@ function loadMaze(img) {
     }
 
     if (!foundStart || !foundGoal) {
+        maze = null;
+        mazeWidth = 0;
+        mazeHeight = 0;
         showError('Maze must have a red start point and green goal point');
-        return;
+        return false;
     }
 
     mazeTextureSeed = computeMazeLayoutSeed(mazeWidth, mazeHeight, maze);
@@ -824,6 +871,7 @@ function loadMaze(img) {
     needsRender = true;
     info.innerHTML = 'Find the green goal! WASD/Arrows to move, Mouse to look. Hold x to run.';
     gameLoopId = requestAnimationFrame(gameLoop);
+    return true;
 }
 
 async function loadMazeFormat(arrayBuffer) {
